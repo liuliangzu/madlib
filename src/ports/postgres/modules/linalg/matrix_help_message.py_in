@@ -1,0 +1,974 @@
+"""@file matrix_ops.py_in
+
+@brief Help message functions for all matrix operations
+
+@namespace linalg
+"""
+
+
+matrix_arg_str = """
+------------------------------------------------------------
+                    MATRIX ARGUMENTS
+------------------------------------------------------------
+A string containing multiple named arguments of the form "name=value".
+This argument is used as a container for multiple parameters related to a single
+matrix.
+
+The following parameters are supported for this string argument:
+    - row: (Default: 'row_num') Name of the column containing row index of the matrix.
+    - col: (Default: 'col_num') Name of the column containing column index of the matrix.
+    - val: (Default: 'val') Name of the column containing the entries of the matrix.
+                            For a dense matrix, this should be of an ARRAY type.
+
+These string arguments can be NULL if the default values are to be used.
+
+If not provided, 'out_args' uses same value as the first input args.
+'out_args' can also include an additional formatting argument:
+    - fmt: The format (dense/sparse) for output matrix. If not specified output
+            format is inferred from the format of input.
+"""
+
+output_str = """
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output table ('matrix_r' above) has the following columns
+-- Dense format
+    '{row}'       -- Row index for each row of the matrix
+    '{val}'       -- Each row vector
+
+-- Sparse format
+    '{row}'        -- Row index for each element
+    '{col}'        -- Column index for each element
+    '{val}'        -- Value for each element
+
+The column names in {} are set using the options provided in 'out_args'.
+"""
+
+
+def _get_help_message(schema_madlib, message, function_name, functionality_str,
+                      usage_str, **kwargs):
+    format_dict = dict(locals().items() + globals().items())
+    if not message:
+        help_string = """
+------------------------------------------------------------
+                        SUMMARY
+------------------------------------------------------------
+Functionality: {functionality_str}
+
+For more details on the function usage:
+    SELECT {schema_madlib}.{function_name}('usage');
+For more details on the two input formats (dense or sparse):
+    SELECT {schema_madlib}.matrix_info();
+        """
+    elif message.lower().strip() in ['usage', 'help', '?']:
+        help_string = usage_str
+    else:
+        help_string = "No such option. Use {schema_madlib}.{function_name}('usage')"
+    return help_string.format(**format_dict)
+
+
+def matrix_info_help_message(schema_madlib, message, **kwargs):
+    """
+    Args:
+        @param schema_madlib
+        @param message
+        @param kwargs
+
+    Returns:
+        STR.
+    """
+    message = message.lower()
+    if not message:
+        help_string = """
+            Run "SELECT matrix_info('dense');" or "SELECT matrix_info('sparse');"
+            for examples of the specific data format.
+        """
+    elif message == 'dense':
+        help_string = """
+A dense matrix is represented as a distributed collection of 1-D arrays.
+An example 3x10 matrix would be the below table:
+
+ row_id |         row_vec
+--------+-------------------------
+   1    | {{9,6,5,8,5,6,6,3,10,8}}
+   2    | {{8,2,2,6,6,10,2,1,9,9}}
+   3    | {{3,9,9,9,8,6,3,9,5,6}}
+
+The column names above can be user-defined - the matrix functions provide options
+to input these column names. The default names expected are 'row_num' and 'val'.
+"""
+    elif message == 'sparse':
+        help_string = """
+A sparse matrix is represented using the row and column indices for each
+non-zero entry of the matrix. This representation is useful for sparse matrices,
+containing multiple zero elements. Given below is an example of a sparse 4x7 matrix
+with just 6 out of 28 entries being non-zero.
+
+Note: There should be exactly one tuple that has a NULL for the '<em>value</em>'
+column. This tuple gives the dimensionality of the sparse matrix (the
+dimensionality cannot be determined just by the entries since the last
+row/column could have all zeros).
+
+ row_id | col_id | value
+--------+--------+-------
+      1 |      1 |     9
+      1 |      5 |     6
+      1 |      7 |     6
+      2 |      1 |     8
+      3 |      1 |     3
+      3 |      2 |     9
+      4 |      7 |     0
+(6 rows)
+
+The column names above can be user-defined - the matrix functions provide options
+to input these column names. The default names expected are 'row_num', 'col_num'
+and 'val'.
+    """
+    else:
+        help_string = "No such option. Use {schema_madlib}.matrix_add('usage')"
+    return help_string.format(schema_madlib=schema_madlib)
+# ----------------------------------------------------------------------
+
+
+def matrix_identity_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Create an identity matrix
+    """
+    functionality_str = "Create a square identity matrix of specified dimension"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_identity(
+    dim             -- Integer specifying the dimensionality of output.
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args'      -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_identity",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_diag_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Creating a diagonal matrix
+    """
+    functionality_str = "Create a diagonal matrix using provided diagonal elements"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_diag(
+    diag_elements   -- The array containing diagonal elements.
+    'matrix_out'    -- Name of output matrix.
+    'out_args'      -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+
+    return _get_help_message(schema_madlib, message, "matrix_diag",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------------------------
+
+
+def matrix_extract_diag_help_message(schema_madlib, message, **kwargs):
+    """ Help message for main diagonal of the matrix
+    """
+    functionality_str = "Extract the main diagonal of a square matrix."
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+SELECT {schema_madlib}.matrix_extract_diag(
+    'matrix_in'     -- Name of the table containing input matrix
+    'in_args'       -- String argument containing matrix_in arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is an array containing the main diagonal.
+        """
+
+    return _get_help_message(schema_madlib, message, "matrix_extract_diag",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_add_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix addition
+    """
+    functionality_str = "Compute addition of two matrices"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_add(
+    'matrix_a',     -- Name of the table containing 1st matrix
+    'a_args',       -- String argument containing matrix_a specific arguments
+                    --     (see matrix arguments below for options)
+    'matrix_b',     -- Name of the table containing 2nd matrix
+    'b_args',       -- String argument containing matrix_b specific arguments
+                    --     (see matrix arguments below for options)
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args',     -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_add",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_zeros_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix initialization with zeros
+    """
+    functionality_str = "Create a matrix with all elements set to zero"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+SELECT {schema_madlib}.matrix_zeros(
+    row_dim,        -- The number of row of matrix initialized with zeros
+    col_dim,        -- The number of column of matrix initialized with zeros
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args',     -- String argument containing matrix_out specific arguments
+                    -- (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_zeros",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_ones_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix initialization with ones
+    """
+    functionality_str = "Create a matrix with all elements set to one"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+SELECT {schema_madlib}.matrix_ones(
+    row_dim,        -- The row dimension of output matrix
+    col_dim,        -- The column dimension of output matrix
+    'matrix_out'    -- Name of output matrix
+    'out_args',     -- String argument containing matrix_out specific arguments
+                    -- (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+    """
+    return _get_help_message(schema_madlib, message, "matrix_ones",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_sub_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix subtraction
+    """
+    functionality_str = "Compute subtraction of two matrices"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_sub(
+    'matrix_a',     -- Name of the table containing 1st matrix
+    'a_args',       -- String argument containing matrix_a specific arguments
+                    --     (see matrix arguments below for options)
+    'matrix_b',     -- Name of the table containing 2nd matrix
+    'b_args',       -- String argument containing matrix_b specific arguments
+                    --     (see matrix arguments below for options)
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args',     -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_sub",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+def matrix_ndims_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix dimension
+    """
+    if not message:
+        help_string = """
+------------------------------------------------------------
+                        SUMMARY
+------------------------------------------------------------
+Functionality: Matrix dimension information
+
+This function provides dimension information of a matrix either in dense or sparse format.
+
+For more details on the function usage:
+    SELECT {schema_madlib}.matrix_ndims('usage');
+For more details on the two input formats (dense or sparse):
+    SELECT {schema_madlib}.matrix_info();
+        """
+    elif message.lower().strip() in ['usage', 'help', '?']:
+        help_string = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_ndims(
+    'matrix_in',    -- Name of the table containing input matrix
+    'in_args',      -- String argument containing matrix_in arguments
+                    --     (see matrix arguments below for options)
+    'is_block'      -- where the table is in block format
+);
+
+------------------------------------------------------------
+                    MATRIX ARGUMENTS
+------------------------------------------------------------
+A string containing multiple named arguments of the form "name=value".
+This argument is used as a container for multiple parameters related to a single
+matrix.
+
+The following parameters are supported for this string argument:
+    row: (Default: 'row_num') Name of the column containing row index of the matrix.
+    col: (Default: 'col_num') Name of the column containing column index of the matrix.
+    val: (Default: 'val') Name of the column containing the entries of the matrix.
+                          For a dense matrix, this should be of an ARRAY type.
+
+These string arguments can be NULL if the default values are to be used.
+
+If not provided, out_args uses same value as in_args.
+
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+        An array with matrix_in dimension information in format of (number of rows,number of columns)
+        """
+    else:
+        help_string = "No such option. Use {schema_madlib}.matrix_trans('usage')"
+    return help_string.format(schema_madlib=schema_madlib)
+# ------------------------------------------------------------------------------
+
+
+def matrix_elem_mult_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix multiplication by element
+    """
+    functionality_str = "Compute element-wise multiplication of two matrices"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_elem_mult(
+    'matrix_a',     -- Name of the table containing 1st matrix
+    'a_args',       -- String argument containing matrix_a specific arguments
+                    --     (see matrix arguments below for options)
+    'matrix_b',     -- Name of the table containing 2nd matrix
+    'b_args',       -- String argument containing matrix_b specific arguments
+                    --     (see matrix arguments below for options)
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args',     -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_elem_mult",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_mult_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix Multiplicationn
+    """
+    functionality_str = "Compute multiplication of two matrices"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_mult(
+    'matrix_a',     -- Name of the table containing 1st matrix
+    'a_args',       -- String argument containing matrix_a specific arguments
+                    --     (see matrix arguments below for options)
+    'matrix_b',     -- Name of the table containing 2nd matrix
+    'b_args',       -- String argument containing matrix_b specific arguments
+                    --     (see matrix arguments below for options)
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args',     -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_mult",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_trans_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix transposition
+    """
+    functionality_str = "Compute transpose of a matrix"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_trans(
+    'matrix_in',     -- Name of the table containing the matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                    --     (see matrix arguments below for options)
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args',     -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_trans",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_extract_row_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix row extraction
+    """
+    functionality_str = "Extract row from a matrix"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_extract_row(
+    'matrix_in',    -- Name of the table containing input matrix
+    'in_args',      -- String argument containing matrix_in specific arguments
+                    --     (see matrix arguments below for options)
+    'index'         -- Index of the desired row
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_extract_row",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_extract_col_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix column extraction
+    """
+    functionality_str = "Extract col from a matrix"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_extract_col(
+    'matrix_in',    -- Name of the table containing input matrix
+    'in_args',      -- String argument containing matrix_in specific arguments
+                    --     (see matrix arguments below for options)
+    'index'         -- Index of the desired col
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_extract_col",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def _min_max_help_message(schema_madlib, message, suffix, **kwargs):
+    """ Common help message for Matrix min and max
+    """
+    functionality_str = "Compute {0} along a specified dimension".format(suffix)
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {1}.matrix_{0}(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'dim'            -- Dimension. Should either be 1 or 2. This value indicates
+                        the dimension to operate along i.e. whose length reduces
+                        to 1 in the result
+    'matrix_r'       -- Name of the table to store result matrix
+    'fetch_index'    -- If true, corresponding index of each {0} value is returned
+);
+
+{{matrix_arg_str}}
+
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output table ('matrix_r' above) has the following columns
+
+    '{0}'       -- Vector of ordered {0} values
+    'index'     -- Vector of ordered corresponding indices of {0} values
+        """.format(suffix, schema_madlib)
+    return _get_help_message(schema_madlib, message, "matrix_" + suffix,
+                             functionality_str, usage_str)
+
+
+def matrix_max_help_message(schema_madlib, message, **kwargs):
+    return _min_max_help_message(schema_madlib, message, 'max')
+
+
+def matrix_min_help_message(schema_madlib, message, **kwargs):
+    return _min_max_help_message(schema_madlib, message, 'min')
+# ------------------------------------------------------------
+
+def matrix_norm_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix norm
+    """
+    if not message:
+        help_string = """
+------------------------------------------------------------
+                        SUMMARY
+------------------------------------------------------------
+Functionality: Matrix norm
+
+This function computes matrix norm values either in dense or sparse format.
+
+For more details on the function usage:
+    SELECT {schema_madlib}.matrix_norm('usage');
+For more details on the two input formats (dense or sparse):
+    SELECT {schema_madlib}.matrix_info();
+        """
+    elif message.lower().strip() in ['usage', 'help', '?']:
+        help_string = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_norm(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'norm_type'      -- Optional, default 'fro'. It supports
+                        'one' or 'o'                1 norm
+                        <float(>0)>                 element-wise norm
+                        'inf' or 'i'                infinite norm
+                        'max' or 'm'                max absolute value norm
+                        'fro' or 'f'                F norm
+);
+
+------------------------------------------------------------
+                    MATRIX ARGUMENTS
+------------------------------------------------------------
+A string containing multiple named arguments of the form "name=value".
+This argument is used as a container for multiple parameters related to a single
+matrix.
+
+The following parameters are supported for this string argument:
+    - row: (Default: 'row_num') Name of the column containing row index of the matrix.
+    - col: (Default: 'col_num') Name of the column containing column index of the matrix.
+    - val: (Default: 'val') Name of the column containing the entries of the matrix.
+                            For a dense matrix, this should be of an ARRAY type.
+
+These string arguments can be NULL if the default values are to be used.
+
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is a value which computes matrix norm.
+        """
+    else:
+        help_string = "No such option. Use {schema_madlib}.matrix_norm('usage')"
+    return help_string.format(schema_madlib=schema_madlib)
+# ------------------------------------------------------------
+
+def _agg_help_message(schema_madlib, message, suffix, **kwargs):
+    """ Common help message for aggregate operations on Matrix
+    """
+    functionality_str = "Compute the {0} along a specific dimension".format(suffix)
+
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {1}.matrix_{0}(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'dim'            -- Dimension. Should either be 1 or 2. This value indicates
+                        the dimension to operate along i.e. whose length reduces
+                        to 1 in the result
+);
+
+{{matrix_arg_str}}
+
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is a vector containing the {0} along given dimension.
+        """.format(suffix, schema_madlib)
+    return _get_help_message(schema_madlib, message, "matrix_" + suffix,
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_sum_help_message(schema_madlib, message, **kwargs):
+    return _agg_help_message(schema_madlib, message, "sum")
+
+
+def matrix_mean_help_message(schema_madlib, message, **kwargs):
+    return _agg_help_message(schema_madlib, message, "mean")
+
+
+def matrix_scalar_mult_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix scalar multiply
+    """
+    functionality_str = "Compute multiplication of matrix with a scalar"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+SELECT {schema_madlib}.matrix_scalar_mult(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'scalar'         -- Scalar value used to be multiplied with matrix_in
+    'matrix_out',    -- Name of the table containing result
+    'out_args',      -- String argument containing matrix_out specific arguments
+                     --    (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+{output_str}
+        """
+    return _get_help_message(schema_madlib, message, "matrix_scalar_mult",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_vec_mult_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix vector multiply
+    """
+    functionality_str = "Compute multiplication of matrix with a vector"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_vec_mult(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'vector'         -- Vector value used to be multiplied with matrix_in
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is an array representing the result of the vector multiplication.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_vec_mult",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_eigen_help_message(schema_madlib, message, **kwargs):
+    """ Help message for Matrix eigen values extraction
+    """
+    functionality_str = "Extract eigen values of matrix"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_eigen(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'matrix_out'     -- Name of the table to store result matrix
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output are eigen values of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_eigen",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_pinv_help_message(schema_madlib, message, **kwargs):
+    """ Help message for generic inverse of matrix
+    """
+    functionality_str = "Generic inverse of matrix"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_pinv(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'matrix_out',    -- Name of the table to store result matrix
+    'out_args'       -- String argument containing matrix_out specific arguments
+                     --    (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is generic inverse of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_pinv",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_cholesky_help_message(schema_madlib, message, **kwargs):
+    """ Help message for cholesky decomposition of matrix
+    """
+    functionality_str = "Matrix cholesky decomposition"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_cholesky(
+    'matrix_in',        -- Name of the table containing input matrix
+    'in_args',          -- String argument containing matrix_in specific arguments
+                        --    (see matrix arguments below for options)
+    'matrix_out_prefix' -- Name prefix of the table to store result matrix L
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is cholesky decomposition of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_cholesky",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_qr_help_message(schema_madlib, message, **kwargs):
+    """ Help message for QR decomposition of matrix
+    """
+    functionality_str = "Matrix QR decomposition"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_qr(
+    'matrix_in',            -- Name of the table containing input matrix
+    'in_args',              -- String argument containing matrix_in specific arguments
+                            --    (see matrix arguments below for options)
+    'matrix_out_prefix',    -- Name prefix of the table to store result matrix
+    'out_args'              -- String argument containing matrix_r specific arguments
+                            --    (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is QR decomposition of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_qr",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_lu_help_message(schema_madlib, message, **kwargs):
+    """ Help message for LU decomposition of matrix
+    """
+    functionality_str = "Matrix LU decomposition"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_lu(
+    'matrix_in',            -- Name of the table containing input matrix
+    'in_args',              -- String argument containing matrix_in specific arguments
+                            --    (see matrix arguments below for options)
+    'matrix_out_prefix',    -- Name of the table to store result matrix P
+    'out_args'              -- String argument containing matrix_p specific arguments
+                            --    (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is LU decomposition of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_lu",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_nuclear_norm_help_message(schema_madlib, message, **kwargs):
+    """ Help message for computing nuclear norm of matrix
+    """
+    functionality_str = "Matrix nuclear norm computing"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_nuclear_norm(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is nuclear norm computing of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_nuclear_norm",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_rank_help_message(schema_madlib, message, **kwargs):
+    """ Help message for computing rank of matrix
+    """
+    functionality_str = "Matrix rank computing"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_rank(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is rank computing of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_rank",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+
+def matrix_inverse_help_message(schema_madlib, message, **kwargs):
+    """ Help message for computing inverse of matrix
+    """
+    functionality_str = "Matrix inverse computing"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_inverse(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args'      -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is inverse of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_inverse",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+def matrix_sparsify_help_message(schema_madlib, message, **kwargs):
+    """ Help message for sparsifying a matrix
+    """
+    functionality_str = "Matrix sparsify"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_sparsify(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args'      -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is the sparse version of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_sparsify",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------
+
+def matrix_densify_help_message(schema_madlib, message, **kwargs):
+    """ Help message for densifying a matrix
+    """
+    functionality_str = "Matrix densify"
+    usage_str = """
+------------------------------------------------------------
+                        USAGE
+------------------------------------------------------------
+
+SELECT {schema_madlib}.matrix_densify(
+    'matrix_in',     -- Name of the table containing input matrix
+    'in_args',       -- String argument containing matrix_in specific arguments
+                     --    (see matrix arguments below for options)
+    'matrix_out'    -- Name of the table to store result matrix
+    'out_args'      -- String argument containing matrix_out specific arguments
+                    --     (see matrix arguments below for options)
+);
+
+{matrix_arg_str}
+------------------------------------------------------------
+                        OUTPUT
+------------------------------------------------------------
+The output is the dense version of the matrix.
+        """
+    return _get_help_message(schema_madlib, message, "matrix_densify",
+                             functionality_str, usage_str)
+# ------------------------------------------------------------

@@ -1,0 +1,185 @@
+/* ----------------------------------------------------------------------- *//**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ *//* ----------------------------------------------------------------------- */
+
+DROP TABLE IF EXISTS vertex, "EDGE";
+CREATE TABLE vertex(
+vertex_id INTEGER
+);
+CREATE TABLE "EDGE"(
+src_node INTEGER,
+dest_node INTEGER,
+user_id INTEGER
+);
+INSERT INTO vertex VALUES
+(0),
+(1),
+(2),
+(3),
+(4),
+(5),
+(6),
+(10),
+(11),
+(12),
+(13),
+(14),
+(15),
+(16);
+INSERT INTO "EDGE" VALUES
+(0, 1, 1),
+(0, 2, 1),
+(1, 2, 1),
+(1, 3, 1),
+(2, 3, 1),
+(2, 5, 1),
+(2, 6, 1),
+(3, 0, 1),
+(5, 6, 1),
+(6, 3, 1),
+(10, 11, 1),
+(10, 12, 1),
+(11, 12, 1),
+(11, 13, 1),
+(12, 13, 1),
+(13, 10, 1),
+(15, 16, 1),
+(15, 14, 1);
+
+DROP TABLE IF EXISTS wcc_out, wcc_out_summary;
+SELECT weakly_connected_components(
+    'vertex',
+    'vertex_id',
+    '"EDGE"',
+    'src=src_node,dest=dest_node',
+    'wcc_out');
+
+SELECT assert(relative_error(count(distinct component_id), 4) < 0.00001,
+        'Weakly Connected Components: Number of components found is not 4.'
+    ) FROM wcc_out;
+
+INSERT INTO "EDGE" VALUES
+(0, 1, 2),
+(0, 2, 2),
+(1, 2, 2),
+(1, 3, 2),
+(2, 3, 2),
+(2, 5, 2),
+(2, 6, 2),
+(3, 0, 2),
+(5, 6, 2),
+(6, 3, 2),
+(10, 11, 2),
+(10, 12, 2),
+(11, 12, 2),
+(11, 13, 2),
+(12, 13, 2),
+(13, 10, 2),
+(15, 16, 2),
+(15, 14, 2);
+
+DROP TABLE IF EXISTS wcc_out, wcc_out_summary;
+SELECT weakly_connected_components(
+    'vertex',
+    'vertex_id',
+    '"EDGE"',
+    'src=src_node,dest=dest_node',
+    'wcc_out',
+    'user_id');
+-- NOTE: The disconnected vertex '4' is not seen as a separate component
+-- in either group. This way of handling disconnected nodes is consistent
+-- with other graph modules that support grouping. At the moment (6/30/17),
+-- we have no way of including disconnected nodes inside a group.
+SELECT assert(relative_error(count(distinct component_id), 3) < 0.00001,
+        'Weakly Connected Components: Number of components found is not 4.'
+    ) FROM wcc_out WHERE user_id=2;
+
+SELECT assert(relative_error(count(distinct component_id), 3) < 0.00001,
+        'Weakly Connected Components: Number of components found is not 4.'
+    ) FROM wcc_out WHERE user_id=1;
+
+-- Test WCC helper functions:
+DROP TABLE IF EXISTS largest_cpt_table;
+SELECT graph_wcc_largest_cpt(
+     'wcc_out',             -- WCC's output table
+     'largest_cpt_table');  -- output table
+SELECT assert(relative_error(num_vertices, 6) < 0.00001,
+        'Weakly Connected Components: Incorrect largest component value.'
+    ) FROM largest_cpt_table WHERE user_id=2;
+
+DROP TABLE IF EXISTS histogram_table;
+SELECT graph_wcc_histogram(
+     'wcc_out',           -- WCC's output table
+     'histogram_table');  -- output table
+SELECT assert(relative_error(num_vertices, 4) < 0.00001,
+        'Weakly Connected Components: Incorrect histogram value.'
+    ) FROM histogram_table WHERE user_id=1 and component_id=10;
+
+DROP TABLE IF EXISTS vc_table;
+SELECT graph_wcc_vertex_check(
+     'wcc_out',    -- WCC's output table
+     '14,15',      -- Pair of vertex IDs
+     'vc_table');  -- output table
+SELECT assert(relative_error(component_id, 14) < 0.00001,
+        'Weakly Connected Components: Incorrect vertex check value.'
+    ) FROM vc_table WHERE user_id=1;
+
+DROP TABLE IF EXISTS reach_table;
+SELECT graph_wcc_reachable_vertices(
+     'wcc_out',         -- WCC's output table
+     '0',               -- source vertex
+     'reach_table');    -- output table
+SELECT assert(relative_error(count(dest), 5) < 0.00001,
+        'Weakly Connected Components: Incorrect reachable vertices value.'
+    ) FROM reach_table WHERE user_id=2 and component_id=0;
+
+DROP TABLE IF EXISTS count_table;
+SELECT graph_wcc_num_cpts(
+     'wcc_out',       -- WCC's output table
+     'count_table');  -- output table
+SELECT assert(relative_error(num_components, 3) < 0.00001,
+        'Weakly Connected Components: Incorrect largest component value.'
+    ) FROM count_table WHERE user_id=1;
+
+-- Test for common column names in vertex and edge tables
+DROP TABLE IF EXISTS out, out_summary;
+ALTER TABLE vertex RENAME COLUMN vertex_id TO src;
+
+SELECT weakly_connected_components('vertex','src','"EDGE"',
+    'src=src_node,dest=dest_node','out','user_id');
+SELECT * FROM out;
+
+DROP TABLE IF EXISTS out, out_summary;
+ALTER TABLE vertex RENAME COLUMN src TO dest;
+
+SELECT weakly_connected_components('vertex','dest','"EDGE"',
+    'src=src_node,dest=dest_node','out','user_id');
+SELECT * FROM out;
+
+ALTER TABLE vertex RENAME COLUMN dest TO id;
+
+-- Test for bigint columns
+
+CREATE TABLE v2 AS SELECT (id+992147483647)::bigint as id FROM vertex;
+CREATE TABLE e2 AS SELECT (src_node+992147483647)::bigint as src, (dest_node+992147483647)::bigint as dest FROM "EDGE";
+
+SELECT weakly_connected_components('v2',NULL,'e2',NULL,'pg_temp.wcc_out');
+SELECT count(*) from pg_temp.wcc_out;
+SELECT count(*) from pg_temp.wcc_out_summary;

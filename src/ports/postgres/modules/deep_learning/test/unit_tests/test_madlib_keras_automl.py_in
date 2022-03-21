@@ -1,0 +1,286 @@
+# coding=utf-8
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+m4_changequote(`<!', `!>')
+m4_ifdef(<!__POSTGRESQL__!>, <!print 'skipping automl for postgres'!>, <!
+
+import sys
+from os import path
+import math
+sys.path.append(path.dirname(path.dirname(path.dirname(path.dirname(path.abspath(__file__))))))
+sys.path.append(path.dirname(path.dirname(path.dirname(path.abspath(__file__)))))
+
+from tensorflow import keras # still needed here even though not explicitly used. DO NOT REMOVE.
+import unittest
+from mock import *
+import plpy_mock as plpy
+
+class HyperbandScheduleTestCase(unittest.TestCase):
+    def setUp(self):
+        # The side effects of this class(writing to the output table) are not
+        # tested here. They are tested in dev-check.
+        self.plpy_mock = Mock(spec='error')
+        patches = {
+            'plpy': plpy,
+            'utilities.mean_std_dev_calculator': Mock()
+        }
+
+        self.plpy_mock_execute = MagicMock()
+        plpy.execute = self.plpy_mock_execute
+
+        self.module_patcher = patch.dict('sys.modules', patches)
+        self.module_patcher.start()
+        import deep_learning.madlib_keras_automl_hyperband
+        self.module = deep_learning.madlib_keras_automl_hyperband
+        # self.module.MstLoaderInputValidator._validate_input_args = \
+        #     MagicMock()
+
+        self.subject = self.module.HyperbandSchedule
+        self.schedule_table = 'schedule_table'
+        self.R = 81
+        self.eta = 3
+        self.skip_last = 0
+
+    def test_schedule_table_dimension(self):
+        generate_schedule = self.subject(
+            self.schedule_table,
+            self.R,
+            self.eta,
+            self.skip_last
+        )
+        s_max = int(math.floor(math.log(self.R, self.eta)))
+        num_depths = int((s_max+1) * (s_max+2) / 2.0)
+        self.assertEqual(num_depths, len(generate_schedule.schedule_vals))
+
+    def test_max_skip_last(self):
+        self.skip_last = int(math.floor(math.log(self.R, self.eta)))+1 # s_max+1
+        with self.assertRaises(plpy.PLPYException):
+            generate_schedule = self.subject(
+                self.schedule_table,
+                self.R,
+                self.eta,
+                self.skip_last
+            )
+    def test_negative_skip_last(self):
+        self.skip_last = -3
+        with self.assertRaises(plpy.PLPYException):
+            generate_schedule = self.subject(
+                self.schedule_table,
+                self.R,
+                self.eta,
+                self.skip_last
+            )
+    def test_zero_resources(self):
+        self.R = 0
+        with self.assertRaises(plpy.PLPYException):
+            generate_schedule = self.subject(
+                self.schedule_table,
+                self.R,
+                self.eta,
+                self.skip_last
+            )
+    def test_negative_resources(self):
+        self.R = -3
+        with self.assertRaises(plpy.PLPYException):
+            generate_schedule = self.subject(
+                self.schedule_table,
+                self.R,
+                self.eta,
+                self.skip_last
+            )
+    def test_non_discarding_eta(self):
+        self.eta = 1
+        with self.assertRaises(plpy.PLPYException):
+            generate_schedule = self.subject(
+                self.schedule_table,
+                self.R,
+                self.eta,
+                self.skip_last
+            )
+    def test_negative_eta(self):
+        self.eta = -2
+        with self.assertRaises(plpy.PLPYException):
+            generate_schedule = self.subject(
+                self.schedule_table,
+                self.R,
+                self.eta,
+                self.skip_last
+            )
+
+    def test_different_R(self):
+        self.R = 27
+        generate_schedule1 = self.subject(
+            self.schedule_table,
+            self.R,
+            self.eta,
+            self.skip_last
+        )
+        s_max = int(math.floor(math.log(self.R, self.eta)))
+        num_depths = int((s_max+1) * (s_max+2) / 2.0)
+        self.assertEqual(num_depths, len(generate_schedule1.schedule_vals))
+
+        self.R = 13
+        generate_schedule2 = self.subject(
+            self.schedule_table,
+            self.R,
+            self.eta,
+            self.skip_last
+        )
+        s_max = int(math.floor(math.log(self.R, self.eta)))
+        num_depths = int((s_max+1) * (s_max+2) / 2.0)
+        self.assertEqual(num_depths, len(generate_schedule2.schedule_vals))
+
+        self.R = 100
+        generate_schedule3 = self.subject(
+            self.schedule_table,
+            self.R,
+            self.eta,
+            self.skip_last
+        )
+        s_max = int(math.floor(math.log(self.R, self.eta)))
+        num_depths = int((s_max+1) * (s_max+2) / 2.0)
+        self.assertEqual(num_depths, len(generate_schedule3.schedule_vals))
+
+    def test_different_eta(self):
+        self.eta = 4
+        generate_schedule3 = self.subject(
+            self.schedule_table,
+            self.R,
+            self.eta,
+            self.skip_last
+        )
+        s_max = int(math.floor(math.log(self.R, self.eta)))
+        num_depths = int((s_max+1) * (s_max+2) / 2.0)
+        self.assertEqual(num_depths, len(generate_schedule3.schedule_vals))
+
+        self.R = 91
+        self.eta = 6
+        generate_schedule3 = self.subject(
+            self.schedule_table,
+            self.R,
+            self.eta,
+            self.skip_last
+        )
+        s_max = int(math.floor(math.log(self.R, self.eta)))
+        num_depths = int((s_max+1) * (s_max+2) / 2.0)
+        self.assertEqual(num_depths, len(generate_schedule3.schedule_vals))
+
+    def test_different_skip_last(self):
+        self.skip_last = 2
+        generate_schedule3 = self.subject(
+            self.schedule_table,
+            self.R,
+            self.eta,
+            self.skip_last
+        )
+        s_max = int(math.floor(math.log(self.R, self.eta)))
+        num_depths = int((s_max+1) * (s_max+2) / 2.0)
+        self.assertEqual(num_depths - (2*(s_max+1)-1), len(generate_schedule3.schedule_vals))
+
+        self.skip_last = 3
+        generate_schedule3 = self.subject(
+            self.schedule_table,
+            self.R,
+            self.eta,
+            self.skip_last
+        )
+        s_max = int(math.floor(math.log(self.R, self.eta)))
+        num_depths = int((s_max+1) * (s_max+2) / 2.0)
+        self.assertEqual(num_depths - (3*(s_max+1)-3), len(generate_schedule3.schedule_vals))
+
+    def tearDown(self):
+        self.module_patcher.stop()
+
+class AutoMLHyperoptTestCase(unittest.TestCase):
+    def setUp(self):
+        # The side effects of this class(writing to the output table) are not
+        # tested here. They are tested in dev-check.
+        self.plpy_mock = Mock(spec='error')
+        patches = {
+            'plpy': plpy,
+            'utilities.mean_std_dev_calculator': Mock()
+        }
+
+        self.plpy_mock_execute = MagicMock()
+        plpy.execute = self.plpy_mock_execute
+
+        self.module_patcher = patch.dict('sys.modules', patches)
+        self.module_patcher.start()
+        import deep_learning.madlib_keras_automl_hyperopt
+        self.module = deep_learning.madlib_keras_automl_hyperopt
+
+        # from deep_learning.madlib_keras_automl_hyperopt import AutoMLHyperopt
+        self.seg_num_mock = Mock()
+
+        class FakeAutoMLHyperopt(self.module.AutoMLHyperopt):
+            def __init__(self, *args):
+                pass
+            self.module.get_seg_number = self.seg_num_mock
+
+        self.subject = FakeAutoMLHyperopt
+
+    def test_get_configs_list_models_less_than_segments(self):
+        automl_hyperopt = self.subject()
+        configs = automl_hyperopt.get_configs_list(1,3)
+        self.assertEquals([(1,1)], configs)
+
+    def test_get_configs_list_models_equal_segments(self):
+        automl_hyperopt = self.subject()
+        configs = automl_hyperopt.get_configs_list(3,3)
+        self.assertEquals([(1,3)], configs)
+
+    def test_get_configs_list_last_bucket_models_less_than_half_segments(self):
+        automl_hyperopt = self.subject()
+        # Last bucket num models < 1/2 num workers
+        configs = automl_hyperopt.get_configs_list(81,20)
+        self.assertEquals([(1, 20), (21, 40), (41, 60), (61, 81)], configs)
+
+    def test_get_configs_list_last_bucket_models_greater_than_half_segments(self):
+        automl_hyperopt = self.subject()
+        # Last bucket num models > 1/2 num workers
+        configs = automl_hyperopt.get_configs_list(20,3)
+        self.assertEquals([(1, 3), (4, 6), (7, 9), (10, 12), (13, 15), (16, 18),(19, 20)], configs)
+
+    def test_get_configs_list_last_bucket_models_equal_half_segments(self):
+        automl_hyperopt = self.subject()
+        # Last bucket num models = 1/2 num workers
+        configs = automl_hyperopt.get_configs_list(90,20)
+        self.assertEquals([(1, 20), (21, 40), (41, 60), (61, 80),(81,90)], configs)
+
+    def test_get_num_segments_all_segments(self):
+        automl_hyperopt = self.subject()
+        automl_hyperopt.source_table = 'dummy_table'
+        self.plpy_mock_execute.return_value = [{'distribution_rules': 'all_segments'}]
+        self.seg_num_mock.return_value = 3
+        self.assertEquals(3, automl_hyperopt.get_num_segments())
+
+    def test_get_num_segments_array_value(self):
+        automl_hyperopt = self.subject()
+        automl_hyperopt.source_table = 'dummy_table'
+        # return list of segment ids as distribution_rules
+        self.plpy_mock_execute.return_value = [{'distribution_rules': [3,1]}]
+        self.assertEquals(2, automl_hyperopt.get_num_segments())
+
+    def tearDown(self):
+        self.module_patcher.stop()
+
+if __name__ == '__main__':
+    unittest.main()
+
+!>)

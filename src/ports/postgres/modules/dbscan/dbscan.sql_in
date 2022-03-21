@@ -1,0 +1,789 @@
+/* ----------------------------------------------------------------------- */
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * @file dbscan.sql_in
+ * @brief Partitions a set of observations into clusters of arbitrary shape based on the density of nearby neighbors.
+ * @date May 2020
+ *
+ */
+/* ----------------------------------------------------------------------- */
+
+
+/**
+@addtogroup grp_dbscan
+
+<div class="toc"><b>Contents</b>
+<ul>
+<li class="level1"><a href="#cluster">Clustering Function</a></li>
+<li class="level1"><a href="#assignment">Cluster Assignment</a></li>
+<li class="level1"><a href="#examples">Examples</a></li>
+<li class="level1"><a href="#literature">Literature</a></li>
+</ul>
+</div>
+
+@brief Partitions a set of observations into clusters of arbitrary
+shape based on the density of nearby neighbors.
+
+\warning <em> This MADlib method is still in early stage development.
+Interface and implementation are subject to change. </em>
+
+Density-based spatial clustering of applications with noise (DBSCAN)
+is a data clustering algorithm designed to discover clusters of arbitrary
+shape [1,2]. It places minimum requirements on domain knowledge to determine
+input parameters and has good efficiency on large databases.
+
+Given a set of points, DBSCAN groups together points that are closely packed with many
+nearby neighbors (\em core), and marks points that lie alone in
+low-density regions with few nearby neighbors (\em border).  Other points in the dataset
+that are not core or border are considered as \em noise.
+This method tends to be good for data which contains clusters
+of similar density.
+
+Currently only a brute force approach is implemented, suitable for small datasets.  
+Other approaches for larger datasets will be implemented in 
+a future release.
+
+@anchor cluster
+@par Clustering Function
+
+<pre class="syntax">
+dbscan( source_table,
+        output_table,
+        id_column,
+        expr_point,
+        eps,
+        min_samples,
+        metric,
+        algorithm,
+        max_segmentation_depth
+      )
+</pre>
+
+\b Arguments
+<dl class="arglist">
+<dt>source_table</dt>
+<dd>TEXT. Name of the table containing the input data points.
+</dd>
+
+<dt>output_table</dt>
+<dd>TEXT. Name of the table containing the clustering results.
+</dd>
+
+<dt>id</dt>
+<dd>TEXT. Name of a column or expression containing a unique integer id for each training point.
+</dd>
+
+<dt>point</dt>
+<dd>TEXT. Name of the column with point coordinates in array form,
+or an expression that evaluates to an array of point coordinates.
+</dd>
+
+<dt>eps</dt>
+<dd>FLOAT8. Maximum distance between two samples for one to
+be considered in the neighborhood of the other. (Note this is not a maximum
+bound on the distances of points within a cluster.) This is an
+important parameter to choose appropriately and should consider both the
+nature of the data set and the distance function.
+</dd>
+
+<dt>min_samples (optional)</dt>
+<dd>INTEGER, default: 5.  Number of samples in a neighborhood for a point
+to be considered as a core point. This includes the point itself.
+This parameter controls how tolerant the algorithm is towards
+noise, so on noisy data sets it may be useful to increase
+the magnitude of this parameter.
+</dd>
+
+@note
+The parameters 'eps' and 'min_samples' together define the density of a cluster.
+A core point is where there exist 'min_samples' other points within a distance of 'eps',
+which are defined as neighbors of the core point.
+A higher value of 'min_samples' or a lower value of 'eps' indicate that higher density
+is needed to form a cluster.
+
+<dt>metric (optional)</dt>
+<dd>TEXT, default: 'squared_dist_norm2'. The name of the function used
+to calculate the distance between data points. The following distance
+functions can be used:
+<ul>
+<li><b>\ref dist_norm1</b>:  1-norm/Manhattan (element-wise median).
+MADlib does not provide a median aggregate function for
+performance reasons.</li>
+<li><b>\ref dist_norm2</b>: 2-norm/Euclidean (element-wise mean)</li>
+<li><b>\ref squared_dist_norm2</b>: squared Euclidean distance (element-wise mean)</li>
+<li><b>\ref dist_angle</b>: angle (element-wise mean of normalized points)</li>
+<li><b>\ref dist_tanimoto</b>: tanimoto (element-wise mean of normalized points)</li>
+</dd>
+
+<dt>algorithm (optional)</dt>
+<dd>TEXT, default: 'optimized'. The name of the algorithm
+used to compute clusters.
+<ul>
+<li><b>\ref brute_force</b>: Brute force can be slow and should
+not be used for large datasets.  However, it does have less initial
+setup overhead than the parllel-optimized algorithm, which may make
+it faster for some cases involving small datasets.  You can also use
+a short form "b" or "brute" etc. to select brute force.</li>
+
+<li><b>\ref optimized</b>: This uses an rtree index to accelerate range_queries
+while performing the cluster detection.  It is designed with gpdb in mind,
+in which case it intelligently partitions the space into a number of connected
+regions, runs DBSCAN in parallel on each region, and then merges the results
+together.  By default, the maximum number of regions it will consider using
+is equal to the number of segments in the database, but if you suspect it
+may be spending too much time on the segmentation, this can be limited further
+by setting the max_segmentation_depth parameter to something lower.  This should
+decrease the segmentation overhead, but will also decrease the amount of parallelism.
+If the dataset is relatively small, another option to consider is brute force,
+which has very little overhead but won't scale as well.  For large enough datasets,
+and an appropriate choice of eps, this algorithm should be able to run in O((N/S) log N)
+time where N is the number of rows (points) in the input and S is the number of regions
+(often equal to the number of segments, but may be less).  (Worst case for brute force
+is O(N^2).) eps should be chosen based on the density of the dataset, where DBSCAN works
+best for datasets where the clusters have a roughly uniform density.  If eps is chosen
+too large, then the runtime will explode and nearly every point will be considered
+connected to every other point in one large cluster.  Best practice is to start with
+a relatively small eps, so it can return the first result faster; if it looks
+like there are too many small clusters, increase eps and allow it to run for longer.
+
+</ul></dd>
+
+<dt>max_segmentation_depth (optional)</dt>
+<dd>INTEGER, default: <number of segments>. The number of regions to segment
+the data. See <b>optimized</b> for usage.
+</dd>
+
+</dl>
+
+<b>Output</b>
+<br>
+The output table for DBSCAN module has the following columns:
+<table class="output">
+    <tr>
+        <th>id</th>
+        <td>SMALLINT|INTEGER|BIGINT. A column or expression which specifies
+            unique ids for each row in the training dataset.  Must evaluate
+            to an integer type.</td>
+    </tr>
+    <tr>
+        <th>cluster_id</th>
+        <td>INTEGER. The cluster id of each classified data point.</td>
+    </tr>
+    <tr>
+        <th>is_core_point</th>
+        <td>BOOLEAN. Indicates if the training data point is core
+        If it is not a core point and listed in the output table,
+        it is a border point.  Noise points are not shown in this
+        table.</td>
+    </tr>
+    <tr>
+        <th>point</th>
+        <td>TEXT. The coordinates of each point classified</td>
+    </tr>
+</table>
+
+@anchor assignment
+@par Cluster Assignment
+
+After clustering, the cluster assignment for each data point can be computed:
+
+<pre class="syntax">
+dbscan_predict( dbscan_table,
+                source_table,
+                id,
+                point,
+                output_table
+                )
+</pre>
+
+<b>Arguments</b>
+<dl class="arglist">
+
+<dt>dbscan_table</dt>
+<dd>TEXT. Name of the table created by running DBSCAN.</dd>
+
+<dt>source_table</dt>
+<dd>TEXT. Name of the table containing the input data points.
+</dd>
+
+<dt>id</dt>
+<dd>VARCHAR.  A column name or expression which selects a unique integer
+              id for each training point.
+</dd>
+
+<dt>point</dt>
+<dd>TEXT. Name of the column with point coordinates in array form,
+or an expression that evaluates to an array of point coordinates.
+</dd>
+
+<dt>output_table</dt>
+<dd>TEXT. Name of the table containing the clustering results.
+</dd>
+</dl>
+
+<b>Output</b>
+<br>
+The output is a table with the following columns:
+<table class="output">
+    <tr>
+      <th>id</th>
+      <td>BIGINT. The unique id of each row, as it as passed in.</td>
+    </tr>
+    <tr>
+      <th>cluster_id</th>
+      <td>INTEGER. Cluster assignment (zero-based, i.e., 0,1,2...).</td>
+    </tr>
+    <tr>
+      <th>distance</th>
+      <td>DOUBLE PRECISION. Distance to the cluster centroid.</td>
+    </tr>
+</table>
+
+@anchor examples
+@par Examples
+
+-# Create input data:
+<pre class="example">
+DROP TABLE IF EXISTS dbscan_train_data;
+CREATE TABLE dbscan_train_data (pid int, points double precision[]);
+INSERT INTO dbscan_train_data VALUES
+(1,  '{1, 1}'),
+(2,  '{2, 1}'),
+(3,  '{1, 2}'),
+(4,  '{2, 2}'),
+(5,  '{3, 5}'),
+(6,  '{3, 9}'),
+(7,  '{3, 10}'),
+(8,  '{4, 10}'),
+(9,  '{4, 11}'),
+(10,  '{5, 10}'),
+(11,  '{7, 10}'),
+(12,  '{10, 9}'),
+(13,  '{10, 6}'),
+(14,  '{9, 5}'),
+(15,  '{10, 5}'),
+(16,  '{11, 5}'),
+(17,  '{9, 4}'),
+(18,  '{10, 4}'),
+(19,  '{11, 4}'),
+(20,  '{10, 3}');
+CREATE TABLE dbscan_test_data (pid int, points double precision[]);
+INSERT INTO dbscan_test_data VALUES
+(1,  '{1, 2}'),
+(2,  '{2, 2}'),
+(3,  '{1, 3}'),
+(4,  '{2, 2}'),
+(10,  '{5, 11}'),
+(11,  '{7, 10}'),
+(12,  '{10, 9}'),
+(13,  '{10, 6}'),
+(14,  '{9, 5}'),
+(15,  '{10, 6}');
+</pre>
+-#  Run DBSCAN using the brute force method with a Euclidean
+distance function:
+<pre class="example">
+DROP TABLE IF EXISTS dbscan_result, dbscan_result_summary;
+SELECT madlib.dbscan(
+                'dbscan_train_data',    -- source table
+                'dbscan_result',        -- output table
+                'pid',                  -- point id column
+                'points',               -- data point
+                 1.75,                  -- epsilon
+                 4,                     -- min samples
+                'dist_norm2',           -- metric
+                'brute_force');         -- algorithm
+SELECT * FROM dbscan_result ORDER BY pid;
+</pre>
+<pre class="result">
+ pid | cluster_id | is_core_point | __points__
+-----+------------+---------------+------------
+   1 |          0 | t             | {1,1}
+   2 |          0 | t             | {2,1}
+   3 |          0 | t             | {1,2}
+   4 |          0 | t             | {2,2}
+   6 |          1 | f             | {3,9}
+   7 |          1 | t             | {3,10}
+   8 |          1 | t             | {4,10}
+   9 |          1 | t             | {4,11}
+  10 |          1 | f             | {5,10}
+  13 |          2 | t             | {10,6}
+  14 |          2 | t             | {9,5}
+  15 |          2 | t             | {10,5}
+  16 |          2 | t             | {11,5}
+  17 |          2 | t             | {9,4}
+  18 |          2 | t             | {10,4}
+  19 |          2 | t             | {11,4}
+  20 |          2 | t             | {10,3}
+(17 rows)
+</pre>
+There are three clusters created.  All points are core points
+except for 6 and 10 which are border points.  The noise points
+do not show up in the output table. If you want to see the noise points
+you can use a query like:
+<pre class="example">
+SELECT l.* FROM dbscan_train_data l WHERE NOT EXISTS
+    (SELECT NULL FROM dbscan_result r WHERE r.pid = l.pid)
+    ORDER BY l.pid;
+</pre>
+<pre class="result">
+ pid | points
+-----+--------
+   5 | {3,5}
+  11 | {7,10}
+  12 | {10,9}
+</pre>
+The summary table lists the 'eps' value and the distance metric used:
+<pre class="example">
+SELECT * FROM dbscan_result_summary;
+</pre>
+<pre class="result">
+ id | eps  |   metric
+-----------+------+------------
+ pid       | 1.75 | dist_norm2
+</pre>
+-#  Find the cluster assignment for the test data points:
+<pre class="example">
+SELECT madlib.dbscan_predict(
+                        'dbscan_result',        -- from DBSCAN run
+                        'dbscan_test_data',     -- test dataset
+                        'pid',                  -- point id column
+                        'points',               -- data point
+                        'dbscan_predict_out'    -- output table
+                        );
+SELECT * FROM dbscan_predict_out ORDER BY pid;
+</pre>
+<pre class="result">
+ pid | cluster_id | distance 
+-----+------------+----------
+   1 |          0 |        0
+   2 |          0 |        0
+   3 |          0 |        1
+   4 |          0 |        0
+  10 |          1 |        1
+  13 |          2 |        0
+  14 |          2 |        0
+  15 |          2 |        0
+(8 rows)
+</pre>
+
+@anchor literature
+@literature
+
+[1] Martin Ester, Hans-Peter Kriegel, Jörg Sander, Xiaowei Xu,
+"A Density-Based Algorithm for Discovering Clusters
+in Large Spatial Databases with Noise", KDD-96 Proceedings, 
+https://www.aaai.org/Papers/KDD/1996/KDD96-037.pdf
+
+[2] Erich Schubert, Jörg Sander, Martin Ester, Hans-Peter Kriegel, Xiaowei Xu,
+"DBSCAN Revisited, Revisited: Why and How You Should (Still) Use DBSCAN",
+ACM Transactions on Database Systems, July 2017, Article No. 19,
+https://dl.acm.org/doi/10.1145/3068335
+
+*/
+
+
+m4_include(`SQLCommon.m4')
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan(
+    source_table                VARCHAR,
+    output_table                VARCHAR,
+    id_column                   VARCHAR,
+    expr_point                  VARCHAR,
+    eps                         DOUBLE PRECISION,
+    min_samples                 INTEGER,
+    metric                      VARCHAR,
+    algorithm                   VARCHAR,
+    max_segmentation_depth      INTEGER
+) RETURNS VOID AS $$
+    PythonFunction(dbscan, dbscan, dbscan)
+$$ LANGUAGE plpythonu VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan(
+    source_table                VARCHAR,
+    output_table                VARCHAR,
+    id_column                   VARCHAR,
+    expr_point                  VARCHAR,
+    eps                         DOUBLE PRECISION,
+    min_samples                 INTEGER,
+    metric                      VARCHAR,
+    algorithm                   VARCHAR
+) RETURNS VOID AS $$
+    SELECT MADLIB_SCHEMA.dbscan($1, $2, $3, $4, $5, $6, $7, $8, NULL);
+$$ LANGUAGE sql VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan(
+    source_table                VARCHAR,
+    output_table                VARCHAR,
+    id_column                   VARCHAR,
+    expr_point                  VARCHAR,
+    eps                         DOUBLE PRECISION,
+    min_samples                 INTEGER,
+    metric                      VARCHAR
+) RETURNS VOID AS $$
+    SELECT MADLIB_SCHEMA.dbscan($1, $2, $3, $4, $5, $6, $7, NULL, NULL);
+$$ LANGUAGE sql VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan(
+    source_table                VARCHAR,
+    output_table                VARCHAR,
+    id_column                   VARCHAR,
+    point                       VARCHAR,
+    eps                         DOUBLE PRECISION,
+    min_samples                 INTEGER
+) RETURNS VOID AS $$
+    SELECT MADLIB_SCHEMA.dbscan($1, $2, $3, $4, $5, $6, NULL, NULL, NULL);
+$$ LANGUAGE sql VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan(
+    source_table                VARCHAR,
+    output_table                VARCHAR,
+    id_column                   VARCHAR,
+    expr_point                  VARCHAR,
+    eps                         DOUBLE PRECISION
+) RETURNS VOID AS $$
+    SELECT MADLIB_SCHEMA.dbscan($1, $2, $3, $4, $5, NULL, NULL, NULL, NULL);
+$$ LANGUAGE sql VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan_predict(
+    dbscan_table                VARCHAR,
+    source_table                VARCHAR,
+    id_column                   VARCHAR,
+    expr_point                  VARCHAR,
+    output_table                VARCHAR
+) RETURNS VOID AS $$
+    PythonFunction(dbscan, dbscan, dbscan_predict)
+$$ LANGUAGE plpythonu VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan(
+    message                VARCHAR
+) RETURNS VARCHAR AS $$
+    PythonFunction(dbscan, dbscan, dbscan_help)
+$$ LANGUAGE plpythonu VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan(
+) RETURNS VARCHAR AS $$
+    PythonFunction(dbscan, dbscan, dbscan_help)
+$$ LANGUAGE plpythonu VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan_predict(
+    message                VARCHAR
+) RETURNS VARCHAR AS $$
+    PythonFunction(dbscan, dbscan, dbscan_predict_help)
+$$ LANGUAGE plpythonu VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.dbscan_predict(
+) RETURNS VARCHAR AS $$
+    PythonFunction(dbscan, dbscan, dbscan_predict_help)
+$$ LANGUAGE plpythonu VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.sf_merge(
+    state1          BIGINT[][],
+    state2          BIGINT[][]
+) RETURNS BIGINT[][] AS $$
+PythonFunctionBodyOnlyNoSchema(`dbscan', `dbscan')
+    return dbscan.sf_merge(**globals())
+$$ LANGUAGE plpythonu
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.sf_final(
+    state BIGINT[][]
+) RETURNS BIGINT[][] AS $$
+PythonFunctionBodyOnlyNoSchema(`dbscan', `dbscan')
+    return dbscan.sf_final(**globals())
+$$ LANGUAGE plpythonu
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.sf_transition(
+    state                       BIGINT[],
+    src                         BIGINT,
+    dest                        BIGINT,
+    n_rows                      INTEGER[],
+    gp_segment_id               INTEGER
+
+) RETURNS BIGINT[][] AS $$
+PythonFunctionBodyOnlyNoSchema(`dbscan', `dbscan')
+    return dbscan.sf_transition(**globals())
+$$ LANGUAGE plpythonu
+m4_ifdef(`__HAS_FUNCTION_PROPERTIES__', `NO SQL', `');
+
+DROP AGGREGATE IF EXISTS MADLIB_SCHEMA.build_snowflake_table(
+    BIGINT,
+    BIGINT,
+    INTEGER[],
+    INTEGER);
+CREATE AGGREGATE MADLIB_SCHEMA.build_snowflake_table(
+    BIGINT,
+    BIGINT,
+    INTEGER[],
+    INTEGER
+)(
+    STYPE=BIGINT[][],
+    SFUNC=MADLIB_SCHEMA.sf_transition,
+    m4_ifdef(`__POSTGRESQL__', `', `prefunc=MADLIB_SCHEMA.sf_merge,')
+    FINALFUNC=MADLIB_SCHEMA.sf_final
+);
+
+DROP TYPE IF EXISTS MADLIB_SCHEMA.__dbscan_record CASCADE;
+CREATE TYPE MADLIB_SCHEMA.__dbscan_record AS (
+    id              BIGINT,
+    point           DOUBLE PRECISION[],
+    is_core_point   BOOL,
+    cluster_id      BIGINT,
+    leaf_id         INT,
+    dist_id         INT
+);
+
+DROP TYPE IF EXISTS MADLIB_SCHEMA.__dbscan_edge CASCADE;
+CREATE TYPE MADLIB_SCHEMA.__dbscan_edge AS (
+    src BIGINT,
+    dest BIGINT);
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dbscan_unpack_edge (packed BIGINT[][])
+  RETURNS SETOF MADLIB_SCHEMA.__dbscan_edge
+AS $$
+    return packed
+$$ LANGUAGE plpythonu VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dbscan_safe_ln(x DOUBLE PRECISION)
+RETURNS DOUBLE PRECISION AS
+$$
+    SELECT CASE WHEN $1 > 0.0
+        THEN ln($1)
+        ELSE -1000.0
+    END
+$$ LANGUAGE SQL IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dbscan_safe_exp(x DOUBLE PRECISION)
+RETURNS DOUBLE PRECISION AS
+$$
+    SELECT CASE WHEN $1 > -600.0
+        THEN exp($1)
+        ELSE 0.0
+    END
+$$ LANGUAGE SQL IMMUTABLE;
+
+DROP AGGREGATE IF EXISTS MADLIB_SCHEMA.prod(DOUBLE PRECISION);
+CREATE AGGREGATE MADLIB_SCHEMA.prod(DOUBLE PRECISION)
+(
+   sfunc = float8mul,
+   stype = DOUBLE PRECISION
+);
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dbscan_split_volume(
+    V DOUBLE    PRECISION,	  -- $1
+    eps_bin     DOUBLE PRECISION, -- $2
+    eps_bins    DOUBLE PRECISION  -- $3
+) RETURNS DOUBLE PRECISION
+AS
+$$ SELECT
+    $2 / $3 * $1
+$$ LANGUAGE SQL IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dbscan_estimate_neighbors(
+    internal_points     DOUBLE PRECISION, -- $1
+    V                   DOUBLE PRECISION, -- $2
+    eps                 DOUBLE PRECISION, -- $3
+    D                   BIGINT	     	  -- $4
+) RETURNS DOUBLE PRECISION
+AS
+$$ SELECT
+    CASE WHEN $2 > 0.0
+    THEN
+        $1 * ($3^$4 / $2)
+    ELSE
+        1.0
+    END
+$$ LANGUAGE SQL IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dbscan_range_query_penalty(
+    internal_points BIGINT,	-- $1
+    neighbors DOUBLE PRECISION	-- $2
+) RETURNS DOUBLE PRECISION
+AS
+$$ SELECT
+    greatest(
+        $2,
+        CASE WHEN $1 > 2
+            -- 60x faster than log(internal_points, 2.0)
+            -- due to DOUBLE PRECISION types instead of NUMERIC
+            THEN ceil(ln($1::DOUBLE PRECISION) / ln(2.0::DOUBLE PRECISION))
+            ELSE 1.0
+        END
+    )
+$$ LANGUAGE SQL IMMUTABLE;
+
+DROP TYPE IF EXISTS MADLIB_SCHEMA.__dbscan_losses;
+CREATE TYPE MADLIB_SCHEMA.__dbscan_losses AS (
+    left_avail      BIGINT,
+    right_avail     BIGINT,
+    left_loss       DOUBLE PRECISION,
+    right_loss      DOUBLE PRECISION
+);
+
+-- Decide how much of node's available segments to allocate
+--  to its left child.  The rest will be allocated to its
+--  right child
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dbscan_allocate_segs(
+    avail_segs BIGINT,		   -- $1
+    left_points DOUBLE PRECISION,  -- $2
+    right_points DOUBLE PRECISION, -- $3
+    rqp_left DOUBLE PRECISION,	   -- $4
+    rqp_right DOUBLE PRECISION	   -- $5
+) RETURNS BIGINT AS
+$$
+    WITH p(left_penalty, right_penalty) AS (
+        SELECT
+            $4 * $2,
+            $5 * $3
+    )
+    SELECT
+        round(
+            left_penalty * $1 / (left_penalty + right_penalty)
+        )::BIGINT
+    FROM p
+$$ LANGUAGE SQL IMMUTABLE;
+
+-- Given internal and external point counts in left and right regions,
+-- returns optimal number of segments to allocate to left and right
+-- nodes, as well as their losses.
+--
+-- TODO: we can probably remove range-query neighbor penalty for
+--       external points if we use rtree.count() instead of
+--       rtree.intersection().  Just need to finish adding the
+--       per-cluster rtrees
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dbscan_segmentation_loss(
+    left_internal BIGINT,	-- $1
+    right_internal BIGINT,	-- $2
+    left_external BIGINT,	-- $3
+    right_external BIGINT,	-- $4
+    avail_segs BIGINT,		-- $5
+    V DOUBLE PRECISION,		-- $6
+    eps DOUBLE PRECISION,	-- $7
+    D BIGINT,			-- $8
+    eps_bin DOUBLE PRECISION,	-- $9
+    eps_bins DOUBLE PRECISION	-- $10
+ ) RETURNS MADLIB_SCHEMA.__dbscan_losses AS
+$$
+    WITH __local AS (
+        SELECT
+            ($1 + $3)	left_points,
+            ($2 + $4)	right_points,
+            $9          left_eps_bins,
+            $10 - $9    right_eps_bins,
+            $10         all_eps_bins
+    ), penalties AS (
+        SELECT
+            MADLIB_SCHEMA.__dbscan_range_query_penalty(
+                $1 + $2,
+                MADLIB_SCHEMA.__dbscan_estimate_neighbors(
+                    $1 + $2,
+                    $6, $7, $8
+                )
+            )                                             rqp_all,
+            MADLIB_SCHEMA.__dbscan_range_query_penalty(
+                $1,
+                MADLIB_SCHEMA.__dbscan_estimate_neighbors(
+                    $1,
+                    MADLIB_SCHEMA.__dbscan_split_volume(
+                        $6,
+                        left_eps_bins,
+                        all_eps_bins
+                    ), 
+                    $7,
+                    $8
+                )
+            )                                             rqp_left,
+            MADLIB_SCHEMA.__dbscan_range_query_penalty(
+                $2,
+                MADLIB_SCHEMA.__dbscan_estimate_neighbors(
+                    $2,
+                        MADLIB_SCHEMA.__dbscan_split_volume(
+                        $6,
+                        left_eps_bins,
+                        all_eps_bins
+                    ), $7, $8
+                )
+            )                                             rqp_right
+        FROM __local
+    ), seg_alloc(left_avail, all_penalty) AS (
+        SELECT
+            MADLIB_SCHEMA.__dbscan_allocate_segs(
+                $5,
+                left_points,
+                right_points,
+                rqp_left,
+                rqp_right
+            ),
+            (left_points + right_points) * rqp_all
+        FROM __local, penalties
+    )
+    SELECT
+        CASE WHEN
+            0 < left_avail AND left_avail < $5
+        THEN
+            ROW(
+                left_avail,
+                $5 - left_avail,
+                (left_points * 1.0 / left_avail) * rqp_left,
+                (right_points * 1.0 / ($5 - left_avail)) * rqp_right
+               )::MADLIB_SCHEMA.__dbscan_losses
+        ELSE -- forget about splitting, not worth it
+            ROW(
+                $5,
+                0,
+                -- We intentionally do not divide by avail_segs,
+                --  because if we choose not to split, then there can be no
+                --  more division later on
+                (left_points + right_points) * rqp_all,
+                0.0
+               )::MADLIB_SCHEMA.__dbscan_losses
+        END
+    FROM __local, penalties, seg_alloc
+$$ LANGUAGE SQL IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dbscan_leaf(
+    db_rec              MADLIB_SCHEMA.__dbscan_record,
+    eps                 REAL,
+    min_samples         INT,
+    metric              TEXT,
+    num_internal_points BIGINT,
+    num_external_points BIGINT
+) RETURNS SETOF MADLIB_SCHEMA.__dbscan_record AS
+$$
+    global SD
+    args.append(SD)
+    import plpy
+
+    PythonFunctionBodyOnlyNoSchema(dbscan,dbscan)
+    WithTracebackForwarding(return dbscan.dbscan_leaf(*args))
+$$ LANGUAGE plpythonu VOLATILE
+m4_ifdef(`\_\_HAS_FUNCTION_PROPERTIES\_\_', `MODIFIES SQL DATA', `');

@@ -1,0 +1,219 @@
+/* ----------------------------------------------------------------------- *//**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ *//* ----------------------------------------------------------------------- */
+
+DROP TABLE IF EXISTS vertex, "EDGE";
+CREATE TABLE vertex(
+        id INTEGER
+        );
+CREATE TABLE "EDGE"(
+        src INTEGER,
+        dest INTEGER,
+        user_id INTEGER
+        );
+INSERT INTO vertex VALUES
+(0),
+(1),
+(2),
+(3),
+(4),
+(5),
+(6);
+INSERT INTO "EDGE" VALUES
+(0, 1, 1),
+(0, 2, 1),
+(0, 4, 1),
+(1, 2, 1),
+(1, 3, 1),
+(2, 3, 1),
+(2, 5, 1),
+(2, 6, 1),
+(3, 0, 1),
+(4, 0, 1),
+(5, 6, 1),
+(6, 3, 1),
+(0, 1, 2),
+(0, 2, 2),
+(0, 4, 2),
+(1, 2, 2),
+(1, 3, 2),
+(2, 3, 2),
+(3, 0, 2),
+(4, 0, 2),
+(5, 6, 2),
+(6, 3, 2);
+
+-- Test pagerank without group
+DROP TABLE IF EXISTS pagerank_out, pagerank_out_summary;
+SELECT pagerank(
+             'vertex',        -- Vertex table
+             'id',            -- Vertix id column
+             '"EDGE"',          -- "EDGE" table
+             'src=src, dest=dest', -- "EDGE" args
+             'pagerank_out');    -- Output table of PageRank
+
+-- View the PageRank of all vertices, sorted by their scores.
+SELECT assert(relative_error(SUM(pagerank), 1) < 0.00001,
+        'PageRank: Scores do not sum up to 1.'
+    ) FROM pagerank_out;
+
+
+-- Test pagerank with group
+DROP TABLE IF EXISTS pagerank_gr_out;
+DROP TABLE IF EXISTS pagerank_gr_out_summary;
+SELECT pagerank(
+             'vertex',        -- Vertex table
+             'id',            -- Vertix id column
+             '"EDGE"',          -- "EDGE" table
+             'src=src, dest=dest', -- "EDGE" args
+             'pagerank_gr_out', -- Output table of PageRank
+             NULL,              -- Default damping factor (0.85)
+             NULL,              -- Default max iters (100)
+             NULL,              -- Default Threshold
+             'user_id');        -- Grouping Column
+
+-- View the PageRank of all vertices, sorted by their scores.
+SELECT assert(relative_error(SUM(pagerank), 1) < 0.00001,
+        'PageRank: Scores do not sum up to 1 for group 1.'
+    ) FROM pagerank_gr_out WHERE user_id=1;
+SELECT assert(relative_error(SUM(pagerank), 1) < 0.00001,
+        'PageRank: Scores do not sum up to 1 for group 2.'
+    ) FROM pagerank_gr_out WHERE user_id=2;
+
+-- Check the iteration numbers for convergency
+SELECT assert(relative_error(__iterations__, 11) = 0,
+        'PageRank: Incorrect iterations for group 1.'
+    ) FROM pagerank_gr_out_summary WHERE user_id=1;
+SELECT assert(relative_error(__iterations__, 14) = 0,
+        'PageRank: Incorrect iterations for group 2.'
+    ) FROM pagerank_gr_out_summary WHERE user_id=2;
+
+
+-- Tests for Personalized Page Rank
+-- Test without grouping
+
+DROP TABLE IF EXISTS pagerank_ppr_out;
+DROP TABLE IF EXISTS pagerank_ppr_out_summary;
+SELECT pagerank(
+             'vertex',        -- Vertex table
+             'id',            -- Vertix id column
+             '"EDGE"',          -- "EDGE" table
+             'src=src, dest=dest', -- "EDGE" args
+             'pagerank_ppr_out', -- Output table of PageRank
+             NULL,              -- Default damping factor (0.85)
+             NULL,              -- Default max iters (100)
+             NULL,              -- Default Threshold
+             NULL,         -- Grouping column
+            '{1,3}');             -- Personlized Nodes
+SELECT assert(relative_error(SUM(pagerank), 1) < 0.005,
+        'PageRank: Scores do not sum up to 1 for group 1.'
+    ) FROM pagerank_ppr_out;
+select assert(array_agg(id order by pagerank desc) = '{0,3,1,2,4,6,5}','Unexpected Ranking') from pagerank_ppr_out;
+
+-- Test with grouping
+
+DROP TABLE IF EXISTS pagerank_ppr_grp_out;
+DROP TABLE IF EXISTS pagerank_ppr_grp_out_summary;
+SELECT pagerank(
+             'vertex',        -- Vertex table
+             'id',            -- Vertix id column
+             '"EDGE"',          -- "EDGE" table
+             'src=src, dest=dest', -- "EDGE" args
+             'pagerank_ppr_grp_out', -- Output table of PageRank
+             NULL,              -- Default damping factor (0.85)
+             NULL,              -- Default max iters (100)
+             NULL,              -- Default Threshold
+             'user_id',         -- Grouping column
+            '{1,3}');             -- Personlized Nodes
+
+-- we don't assert pagerank sum up to 1 here for user_id=2 here because it is
+-- a speacial sub graph where there are nodes without incoming or outgoing edges,
+-- and in such case pagerank score won't sum up to 1.
+-- Instead, here we only test if the pagerank order is correct
+SELECT assert(relative_error(SUM(pagerank), 1) < 0.005,
+        'PageRank: Scores do not sum up to 1 for group 1.'
+    ) FROM pagerank_ppr_grp_out WHERE user_id=1;
+select assert(array_agg(user_id order by pagerank desc)= '{2, 2, 1, 1, 2, 2, 1, 1, 2, 1, 2, 1, 2, 1}','Unexpected Ranking with grouping ') from  pagerank_ppr_grp_out  ;
+
+
+-- Test to capture corner case reported in https://issues.apache.org/jira/browse/MADLIB-1229
+
+DROP TABLE IF EXISTS vertex, "EDGE";
+CREATE TABLE vertex(
+id INTEGER
+);
+CREATE TABLE "EDGE"(
+src INTEGER,
+dest INTEGER,
+user_id INTEGER
+);
+INSERT INTO vertex VALUES
+(0),
+(1),
+(2);
+INSERT INTO "EDGE" VALUES
+(0, 1, 1),
+(0, 2, 1),
+(1, 2, 1),
+(2, 1, 1),
+(0, 1, 2);
+
+
+DROP TABLE IF EXISTS pagerank_gr_out;
+DROP TABLE IF EXISTS pagerank_gr_out_summary;
+SELECT pagerank(
+'vertex', -- Vertex table
+'id', -- Vertix id column
+'"EDGE"', -- "EDGE" table
+'src=src, dest=dest', -- "EDGE" args
+'pagerank_gr_out', -- Output table of PageRank
+NULL, -- Default damping factor (0.85)
+NULL, -- Default max iters (100)
+NULL, -- Default Threshold
+'user_id');
+
+SELECT assert(relative_error(SUM(pagerank), 1) < 0.00001,
+        'PageRank: Scores do not sum up to 1 for group 1.'
+    ) FROM pagerank_gr_out WHERE user_id=1;
+
+-- Test for common column names in vertex and edge tables
+DROP TABLE IF EXISTS out, out_summary;
+ALTER TABLE vertex RENAME COLUMN id TO src;
+
+SELECT pagerank('vertex','src','"EDGE"',NULL,'out',NULL,NULL,NULL,'user_id');
+SELECT * FROM out;
+
+DROP TABLE IF EXISTS out, out_summary;
+ALTER TABLE vertex RENAME COLUMN src TO dest;
+
+SELECT pagerank('vertex','dest','"EDGE"',NULL,'out',NULL,NULL,NULL,'user_id');
+SELECT * FROM out;
+
+ALTER TABLE vertex RENAME COLUMN dest TO id;
+
+-- Test for bigint columns
+
+CREATE TABLE v2 AS SELECT (id+992147483647)::bigint as id FROM vertex;
+CREATE TABLE e2 AS SELECT (src+992147483647)::bigint as src, (dest+992147483647)::bigint as dest FROM "EDGE";
+
+DROP TABLE IF EXISTS pg_temp.out2, pg_temp.out2_summary;
+SELECT pagerank('v2',NULL,'e2',NULL,'pg_temp.out2');
+SELECT count(*) from pg_temp.out2;
+SELECT * from pg_temp.out2_summary;

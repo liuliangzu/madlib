@@ -1,0 +1,146 @@
+/*
+ * PostgreSQL include file for sql_in files.
+ */
+
+/*
+ * During build time, macro definitions will be inserted here.
+ */
+@M4_DEFINES_CODE@
+
+/*
+ * There is no way in m4 to escape the quote characters, so we change it
+ * temporarily to something different than the default.
+ */
+m4_changequote(<!,!>)
+
+/*
+ * WithTracebackForwarding
+ *
+ * @param $1 python statement which might raise an exception
+ *
+ * Use this macro in the sql definition of a plpythonu function
+ *   that runs on the segments.  If the function raises an exception,
+ *   traceback information will be attached to the exception message
+ *   which gets forwarded back to the coordinator.
+ *
+ * On the coordinator side, to attach the message to the DETAIL of the
+ *   exception before displaying, you must call the segment UDF
+ *   or UDA like this:
+ *
+ *   DEBUG.plpy_execute(sql, ..., segment_traceback_reporting=True)
+ */
+m4_define(<!WithTracebackForwarding!>, <!
+    import traceback
+    from sys import exc_info
+    import plpy
+    try:
+        $1
+    except Exception as e:
+        global SD
+        global GD
+
+        for k in SD.keys():
+            del SD[k]
+        del SD
+        for k in GD.keys():
+            del GD[k]
+        del GD
+
+        etype, _, tb = exc_info()
+        detail = ''.join(traceback.format_exception(etype, e, tb))
+        message = e.message + 'SegmentTraceback' + detail
+        e.message = message
+        e.args = (message,)
+        raise e
+!>)
+
+/*
+ * PythonFunction
+ *
+ * @param $1 directory
+ * @param $2 python file (without suffix)
+ * @param $3 function
+ *
+ * Example:
+ * CREATE FUNCTION MADLIB_SCHEMA.logregr_coef(
+ *     "source" VARCHAR,
+ *     "depColumn" VARCHAR,
+ *     "indepColumn" VARCHAR)
+ * RETURNS DOUBLE PRECISION[]
+ * AS $$PythonFunction(regress, logistic, compute_logregr_coef)$$
+ * LANGUAGE plpythonu VOLATILE;
+ */
+m4_define(<!PythonFunction!>, <!
+    import sys
+    from inspect import getframeinfo, currentframe
+    sys.path.insert(1, "EXT_PYTHON_LIBDIR")
+    sys.path.insert(1, "PLPYTHON_LIBDIR")
+    from $1 import $2
+
+    # Retrieve the schema name of the current function
+    # Make it available as variable: schema_madlib
+    fname = getframeinfo(currentframe()).function
+    foid  = fname.rsplit('_',1)[1]
+
+    # plpython names its functions "__plpython_procedure_<function name>_<oid>",
+    # of which we want the oid
+    rv = plpy.execute('SELECT nspname, proname FROM pg_proc p ' \
+         'JOIN pg_namespace n ON (p.pronamespace = n.oid) ' \
+         'WHERE p.oid = %s' % foid, 1)
+
+    global schema_madlib
+    schema_madlib = rv[0]['nspname']
+
+    from utilities.control import AOControl
+    with AOControl(False):
+        return $2.$3(**globals())
+!>)
+
+/*
+ * PythonFunctionBodyOnly
+ *
+ * @param $1 directory
+ * @param $2 python file (without suffix)
+ *
+ */
+m4_define(<!PythonFunctionBodyOnly!>, <!
+    import sys
+    from inspect import getframeinfo, currentframe
+    sys.path.insert(1, "EXT_PYTHON_LIBDIR")
+    sys.path.insert(1, "PLPYTHON_LIBDIR")
+    from $1 import $2
+
+    # Retrieve the schema name of the current function
+    # Make it available as variable: schema_madlib
+    fname = getframeinfo(currentframe()).function
+    foid  = fname.rsplit('_',1)[1]
+
+    # plpython names its functions "__plpython_procedure_<function name>_<oid>",
+    # of which we want the oid
+    rv = plpy.execute('SELECT nspname, proname FROM pg_proc p ' \
+         'JOIN pg_namespace n ON (p.pronamespace = n.oid) ' \
+         'WHERE p.oid = %s' % foid, 1)
+
+    global schema_madlib
+    schema_madlib = rv[0]['nspname']
+    from utilities.control import AOControl,MinWarning
+!>)
+
+/*
+ * PythonFunctionBodyOnlyNoSchema
+ *
+ * @param $1 directory
+ * @param $2 python file (without suffix)
+ *
+ */
+m4_define(<!PythonFunctionBodyOnlyNoSchema!>, <!
+    import sys
+    sys.path.insert(1, "EXT_PYTHON_LIBDIR")
+    sys.path.insert(1, "PLPYTHON_LIBDIR")
+    from $1 import $2
+!>)
+
+/*
+ * Change the quote character back to their defaults.
+ */
+m4_changequote(<!`!>,<!'!>)
