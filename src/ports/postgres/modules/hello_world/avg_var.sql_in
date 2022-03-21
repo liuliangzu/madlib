@@ -1,0 +1,12 @@
+m4_include('SQLCommon.m4') 
+
+
+DROP AGGREGATE IF EXISTS MADLIB_SCHEMA.avg_var(DOUBLE PRECISION);
+ 
+CREATE AGGREGATE MADLIB_SCHEMA.avg_var(DOUBLE PRECISION) (
+    SFUNC=MADLIB_SCHEMA.avg_var_transition,
+    STYPE=double precision[],
+    FINALFUNC=MADLIB_SCHEMA.avg_var_final,
+    m4_ifdef(`__POSTGRESQL__', `', `prefunc=MADLIB_SCHEMA.avg_var_merge_states,')
+    INITCOND='{0, 0, 0}'
+);
