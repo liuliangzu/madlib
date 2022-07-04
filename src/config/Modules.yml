@@ -54,3 +54,4 @@ modules:
     - name: validation
       depends: ['array_ops', 'regress']
     - name: stemmer
+    - name: hello_world

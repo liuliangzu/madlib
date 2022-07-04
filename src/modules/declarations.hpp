@@ -29,3 +29,4 @@
 #include "recursive_partitioning/random_forest.hpp"
 #include "recursive_partitioning/feature_encoding.hpp"
 #include "utilities/utilities.hpp"
+#include "hello_world/avg_var.hpp"
