@@ -50,6 +50,77 @@ CUDA_VISIBLE_DEVICES_KEY = 'CUDA_VISIBLE_DEVICES'
 ########### Keras specific functions #####
 #######################################################################
 
+
+def execute2(*args):
+    import traceback
+    import sys
+    import time
+    time_begin = time.time()
+
+    f = open("/data2/ruike/pg/madlib.sql", 'a')
+    f.write(sys._getframe(2).f_code.co_name + ' ')
+    if len(args) == 1:
+        f.write(str(args[0]) + '\n')
+        f.flush()
+        res = execute_0(args[0])
+
+    if len(args) == 2:
+        f.write(str(args[0]) +'\n')
+        f.flush()
+        #if isinstance(args[0], 'PLyPlan'):
+        #    plpy.notice(True)
+        res = execute_0(args[0], args[1])
+
+    if len(args) == 3:
+        f.write(str(args[0])  +'\n')
+        f.flush()
+        res = execute_0(args[0], args[1], args[2])
+
+    f.write(sys._getframe(2).f_code.co_name + ' '+ "{} seconds\n".format(time.time()-time_begin))
+
+    return res
+
+
+execute_0 = plpy.execute
+plpy.execute = execute2
+
+
+
+
+
+def  prepare2(*args):
+    import sys
+    import traceback
+    import time
+    time_begin = time.time()
+
+
+    f = open("/data2/ruike/pg/madlib.sql", 'a')
+    f.write(sys._getframe(2).f_code.co_name)
+    f.flush()
+    if len(args) == 1:
+        f.write(str(args[0]) + '\n')
+        res = prepare_0(args[0])
+
+    if len(args) == 2:
+         f.write(str(args[0])  +'\n')
+         f.flush()
+         res = prepare_0(args[0], args[1])
+
+    if len(args) == 3:
+         f.write(str(args[0]) +'\n')
+         f.flush()
+         res = preepare_0(args[0], args[1], args[2])
+
+    f.write(sys._getframe(2).f_code.co_name + ' '+ "{} seconds\n".format(time.time()-time_begin))
+
+    return res
+
+
+
+prepare_0 = plpy.prepare
+plpy.prepare = prepare2
+
 def set_cuda_env(value):
     """
     :param value: -1 to disable gpu
