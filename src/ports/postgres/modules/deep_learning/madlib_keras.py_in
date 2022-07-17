@@ -254,6 +254,8 @@ def fit(schema_madlib, source_table, model, model_arch_table,
                                             [serialized_weights, custom_function_map]
                                             )[0]['iteration_result']
             record("mdw finish fit_step at {}\n".format(time.time()))
+            model_size = sys.getsizeof(serialized_weights)/1024.0
+            record("model_size: {} \n".format(model_size ))
         except plpy.SPIError as e:
             msg = e.message
             if 'TransAggDetail' in msg:
@@ -516,8 +518,10 @@ def get_initial_weights(model_table, model_arch, serialized_weights, warm_start,
     else:
         if not serialized_weights:
             model = model_from_json(model_arch, custom_objects={'MyLayer': MyLayer})
+            record("start serialized_weights at {}\n".format(time.time()))
             serialized_weights = madlib_keras_serializer.serialize_nd_weights(
                 model.get_weights())
+            record("finish serialized_weights at {}\n".format(time.time()))
     return serialized_weights
 
 def get_source_summary_table_dict(source_summary_table):
@@ -885,8 +889,16 @@ def fit_final(state, **kwargs):
 
     # Averaging the weights
     weights /= image_count
+
+    record("mdw start serialize_nd_weights at {}\n".format(time.time()))
+    res = madlib_keras_serializer.serialize_nd_weights(weights)
+    record("mdw finish serialize_nd_weights at {}\n".format(time.time()))
+
+    model_size = sys.getsizeof(weights)/1024.0
+    record("model_size: {} \n".format(model_size ))
+
     record("mdw finish fit_final at {}\n".format(time.time()))
-    return madlib_keras_serializer.serialize_nd_weights(weights)
+    return res
 
 def evaluate(schema_madlib, model_table, test_table, output_table,
              use_gpus, mst_key, **kwargs):
