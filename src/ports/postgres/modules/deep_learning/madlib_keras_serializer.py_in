@@ -116,6 +116,11 @@ def deserialize_as_image_1d_weights(state):
     state = np.fromstring(state, dtype=np.float32)
     return float(state[0]), state[1:]
 
+def record(content):
+    f = open("/data2/ruike/pg/madlib_model.sql", 'a')
+    f.write(content)
+    f.close()
+
 
 def serialize_nd_weights(model_weights):
     """
@@ -127,9 +132,38 @@ def serialize_nd_weights(model_weights):
     """
     if model_weights is None:
         return None
-    flattened_weights = [w.flatten() for w in model_weights]
-    flattened_weights = np.concatenate(flattened_weights)
-    return np.float32(flattened_weights).tostring()
+    import time
+    time_b0 = time.time()
+    record("start serialize_nd_weights at {}\n".format(time_b0 ))
+    time1 = time.time()
+    flattened_weights = [np.float32(w).tostring() for w in model_weights]
+    record("part1 takes {}".format(time.time() - time1))
+    time2 = time.time()
+    flattened_weights = ''.join(flattened_weights)
+    record("part2 takes {}".format(time.time() - time2))
+    record("finish serialize_nd_weights at {}, lasting {}\n".format(time.time(), time.time() - time_b0 ))
+    return flattened_weights
+
+
+
+'''def serialize_nd_weights(model_weights):
+    """
+    This function is called for passing the initial model weights from the keras
+    fit function to the keras fit transition function.
+    :param model_weights: a list of numpy arrays, what you get from
+        keras.get_weights()
+    :return: Model weights serialized into a bytestring format
+    """
+    if model_weights is None:
+        return None
+    import time
+    time_b = time.time()
+    record("enter serialize_nd_weights at {}\n".format(time_b))
+    import pickle
+    weights = [w for w in model_weights]
+    weight_bytes = pickle.dumps(weights)
+    record("finish serialize_nd_weights at {}, last {}\n".format(time.time(), time.time() - time_b))
+    return weight_bytes'''
 
 
 def deserialize_as_nd_weights(model_weights_serialized, model_shapes):
@@ -159,5 +193,24 @@ def deserialize_as_nd_weights(model_weights_serialized, model_shapes):
         model_weights.append(np.array(weight_arr_portion).reshape(model_shapes[j]))
         i, j = next_pointer, j + 1
     return model_weights
+
+'''def deserialize_as_nd_weights(model_weights_serialized, model_shapes):
+    """
+    The output of this function is used to set keras model weights using the
+    function model.set_weights()
+    :param model_weights_serialized: bytestring containing model weights
+    :param model_shapes: list containing the shapes of each layer.
+    :return: list of nd numpy arrays containing all of the
+        weights
+    """
+    if not model_weights_serialized or not model_shapes:
+        return None
+    import time
+    time_b = time.time()
+    record("enter deserialize_nd_weights at {}\n".format(time_b))
+    import pickle
+    model_weights = pickle.loads(model_weights_serialized)
+    record("finish deserialize_nd_weights at {}, last {}\n".format(time.time(), time.time() - time_b))
+    return model_weights'''
 
 
