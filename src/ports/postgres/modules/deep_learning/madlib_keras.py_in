@@ -1497,18 +1497,29 @@ def fit_batch_level(schema_madlib, source_table, model, model_arch_table,
     # get the size of serialized model weights string in KB
     model_size = sys.getsizeof(serialized_weights)/1024.0
     record("model_size: {} \n".format(model_size ))
-
+    buffer_size = get_buffer_size(source_table,  shape_col)
+    samples_every = int(round(samples_every / buffer_size) * buffer_size)
+    slot_every = round(samples_every / buffer_size)
+    plpy.info("\n"+ "Use samples_every: {}".format(samples_every ))
     # Run distributed training for specified number of iterations
     for i in range(1, num_iterations+1):
         record("begin {} iteration at {}\n".format(i ,time.time()))
         start_iteration = time.time()
         is_final_iteration = (i == num_iterations)
         total_images = get_image_count_per_seg_from_array(0, images_per_seg_train)
-        inner_iteration = math.ceil(total_images / samples_every)
+        inner_iteration = math.ceil(total_images / float(samples_every))
+        plpy.info("\n"+ "total_images: {} Total inner_iteration: {}".format(total_images, inner_iteration))
         start_id = 0
+        start_slot = 1
+        end_slot = 1 + slot_every
         for j in range(1, int(inner_iteration)):
             try:
+                #https://stackoverflow.com/questions/30896497/postgres-column-does-not-exist-but-its-there-with-alias
                 run_training_iteration = plpy.prepare("""
+        ;WITH TMP_TABLE AS(
+            SELECT *, gp_segment_id, ROW_NUMBER() OVER( PARTITION BY __dist_key__ ) slot_id
+            FROM {source_table}
+        )
         SELECT {schema_madlib}.fit_step_batch_level(
             {start_id},
             {samples_every},
@@ -1528,7 +1539,10 @@ def fit_batch_level(schema_madlib, source_table, model, model_arch_table,
             $1,
             $2
         ) AS iteration_result
-        FROM {source_table}""".format(**locals()), ["bytea", "bytea"])
+        FROM TMP_TABLE
+        WHERE slot_id >= {start_slot}
+            AND slot_id < {end_slot}
+        """.format(**locals()), ["bytea", "bytea"])
                 record("mdw send model at {}\n".format(time.time()))
                 serialized_weights = plpy.execute(run_training_iteration,
                                               [serialized_weights, custom_function_map]
@@ -1537,6 +1551,8 @@ def fit_batch_level(schema_madlib, source_table, model, model_arch_table,
                 model_size = sys.getsizeof(serialized_weights)/1024.0
                 record("model_size: {} \n".format(model_size ))
                 start_id = start_id + samples_every
+                start_slot = start_slot + slot_every
+                end_slot = end_slot + slot_every
             except plpy.SPIError as e:
                 msg = e.message
                 if 'TransAggDetail' in msg:
@@ -1782,41 +1798,41 @@ def fit_transition_batch_level(state, start_id, samples_every, dependent_var, in
     record("seg {} finish set model at {}\n".format(current_seg_id, time.time()))
     record(str(dependent_var_shape) + '\n')
     record("seg {}, agg_image_count: {},  start_id: {}, end_id: {} \n".format(current_seg_id, agg_image_count, start_id, start_id + samples_every))
-    if agg_image_count >= start_id and agg_image_count <= start_id + samples_every:
-        x_train = []
-        y_train = []
-        # Prepare the data
-        for counter, shape in enumerate(independent_var_shape):
-            x_train.append(np_array_float32(independent_var[counter], shape))
+    #if agg_image_count >= start_id and agg_image_count <= start_id + samples_every:
+    x_train = []
+    y_train = []
+    # Prepare the data
+    for counter, shape in enumerate(independent_var_shape):
+        x_train.append(np_array_float32(independent_var[counter], shape))
 
-        for counter, shape in enumerate(dependent_var_shape):
-            y_train.append(np_array_int16(dependent_var[counter], shape))
+    for counter, shape in enumerate(dependent_var_shape):
+        y_train.append(np_array_int16(dependent_var[counter], shape))
 
-        # Fit segment model on data
-        #TODO consider not doing this every time
-        fit_params = parse_and_validate_fit_params(fit_params, current_seg_id)
-        x_train_tmp = x_train[0].T
-        X = [np.array(x_train_tmp[i, :]) for i in range(x_train_tmp.shape[0])]
-        f = open("/data2/ruike/tmp.txt", 'a')
-        f.write("test !\n")
-        f.write(str(len(y_train)))
-        f.write(str(y_train[0].shape))
-        f.write(str(len(x_train)))
-        f.write(str(x_train[0].shape))
-        f.write(str(y_train[0][:,0].reshape(-1,1).shape))
-        f.write(str(X[0].shape))
-        f.write("Train model at {}\n".format(time.time()))
-        f.close()
-        record("seg {} train model at {}\n".format(current_seg_id, time.time()))
-        segment_model.fit(X, y_train[0][:,0].reshape(-1, 1), **fit_params)
-        # Aggregating number of images, loss and accuracy
-        record("seg {} finish train model at {}\n".format(current_seg_id, time.time()))
+    # Fit segment model on data
+    #TODO consider not doing this every time
+    fit_params = parse_and_validate_fit_params(fit_params, current_seg_id)
+    x_train_tmp = x_train[0].T
+    X = [np.array(x_train_tmp[i, :]) for i in range(x_train_tmp.shape[0])]
+    f = open("/data2/ruike/tmp.txt", 'a')
+    f.write("test !\n")
+    f.write(str(len(y_train)))
+    f.write(str(y_train[0].shape))
+    f.write(str(len(x_train)))
+    f.write(str(x_train[0].shape))
+    f.write(str(y_train[0][:,0].reshape(-1,1).shape))
+    f.write(str(X[0].shape))
+    f.write("Train model at {}\n".format(time.time()))
+    f.close()
+    record("seg {} train model at {}\n".format(current_seg_id, time.time()))
+    segment_model.fit(X, y_train[0][:,0].reshape(-1, 1), **fit_params)
+    # Aggregating number of images, loss and accuracy
+    record("seg {} finish train model at {}\n".format(current_seg_id, time.time()))
 
     agg_image_count += dependent_var_shape[0][0]
     GD[GD_STORE.AGG_IMAGE_COUNT] = agg_image_count
     total_images = get_image_count_per_seg_from_array(dist_key_mapping.index(dist_key),
                                                       images_per_seg)
-    is_last_row = agg_image_count == total_images
+    is_last_row = agg_image_count >= samples_every
     return_state = get_state_to_return(segment_model, is_last_row, is_multiple_model,
                                        agg_image_count, total_images)
 
