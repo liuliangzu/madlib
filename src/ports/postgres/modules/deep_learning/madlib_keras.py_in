@@ -889,7 +889,7 @@ def fit_final(state, **kwargs):
 
     # Averaging the weights
     weights /= image_count
-
+    record("image_count:{}\n".format(image_count))
     record("mdw start serialize_nd_weights at {}\n".format(time.time()))
     res = madlib_keras_serializer.serialize_nd_weights(weights)
     record("mdw finish serialize_nd_weights at {}\n".format(time.time()))
@@ -1366,3 +1366,495 @@ loss_type:      Type of loss used that was used in the training step.
     return help_string.format(schema_madlib=schema_madlib)
 # ---------------------------------------------------------------------
 
+@MinWarning("warning")
+def fit_batch_level(schema_madlib, source_table, model, model_arch_table,
+        model_id, compile_params, fit_params, samples_every, num_iterations,
+        use_gpus, validation_table=None,
+        metrics_compute_frequency=None, warm_start=False, name="",
+        description="", object_table=None, **kwargs):
+
+    import math
+    module_name = 'madlib_keras_fit'
+    fit_params = "" if not fit_params else fit_params
+    _assert(compile_params, "Compile parameters cannot be empty or NULL.")
+
+    input_tbl_valid(source_table, module_name)
+    segments_per_host = get_data_distribution_per_segment(source_table)
+    use_gpus = use_gpus if use_gpus else False
+    if use_gpus:
+        accessible_gpus_for_seg = get_accessible_gpus_for_seg(schema_madlib,
+                                                              segments_per_host,
+                                                              module_name)
+    else:
+        accessible_gpus_for_seg = get_seg_number()*[0]
+
+    if object_table is not None:
+        object_table = "{0}.{1}".format(schema_madlib, quote_ident(object_table))
+    fit_validator = FitInputValidator(
+        source_table, validation_table, model, model_arch_table, model_id,
+        num_iterations, metrics_compute_frequency, warm_start,
+        use_gpus, accessible_gpus_for_seg, object_table)
+
+    multi_dep_count = len(fit_validator.dependent_varname)
+    src_summary_dict = fit_validator.src_summary_dict
+    class_values_colnames = [add_postfix(i, "_class_values") for i in
+                             fit_validator.dependent_varname]
+
+    if metrics_compute_frequency is None:
+        metrics_compute_frequency = num_iterations
+
+    warm_start = bool(warm_start)
+
+    # The following two times must be recorded together.
+    metrics_elapsed_start_time = time.time()
+    start_training_time = datetime.datetime.now()
+    #TODO add a unit test for this in a future PR
+    # save the original value of the env variable so that we can reset it later.
+    original_cuda_env = None
+    if CUDA_VISIBLE_DEVICES_KEY in os.environ:
+        original_cuda_env = os.environ[CUDA_VISIBLE_DEVICES_KEY]
+
+    # Get the serialized master model
+    start_deserialization = time.time()
+    model_arch, model_weights = get_model_arch_weights(model_arch_table, model_id)
+
+    # The last n layers are the output layers where n is the number of dep vars
+    num_classes = get_num_classes(model_arch, multi_dep_count)
+
+    input_shape = get_input_shape(model_arch)
+    #fit_validator.validate_input_shapes(input_shape)
+
+    dist_key_col = '0' if is_platform_pg() else DISTRIBUTION_KEY_COLNAME
+    gp_segment_id_col = '0' if is_platform_pg() else GP_SEGMENT_ID_COLNAME
+
+    serialized_weights = get_initial_weights(model, model_arch, model_weights,
+                                             warm_start, accessible_gpus_for_seg)
+    # Compute total images on each segment
+    shape_col = fit_validator.dependent_shape_varname[0]
+    dist_key_mapping, images_per_seg_train = \
+        get_image_count_per_seg_for_minibatched_data_from_db(source_table,
+                                                             shape_col)
+
+    if validation_table:
+        shape_col = fit_validator.val_dependent_shape_varname[0]
+        dist_key_mapping_val, images_per_seg_val = \
+            get_image_count_per_seg_for_minibatched_data_from_db(validation_table,
+                                                                 shape_col)
+
+    # Construct validation dataset if provided
+    validation_set_provided = bool(validation_table)
+    validation_metrics = []; validation_loss = []
+
+    # Prepare the SQL for running distributed training via UDA
+    compile_params_to_pass = quote_literal(compile_params)
+    fit_params_to_pass = quote_literal(fit_params)
+    custom_function_map = None
+
+    # If the object_table exists, we read the list of custom
+    # function used in the compile_params and map it to their
+    # object definition from the object table
+    custom_fn_list = get_custom_functions_list(compile_params)
+    if object_table is not None:
+        custom_function_map = query_custom_functions_map(object_table, custom_fn_list)
+    elif len(custom_fn_list) >= 1:
+        # Error out if custom_function is called without specifying the object table
+        # with the function definition
+        plpy.error("Object table not specified for function {0} in compile_params".format(custom_fn_list))
+
+    # Use the smart interface
+    if (len(fit_validator.dependent_varname) <= 5 and
+            len(fit_validator.independent_varname) <= 5):
+
+        dep_var_array = 5 * ["NULL"]
+        indep_var_array = 5 * ["NULL"]
+
+        for counter, var in enumerate(fit_validator.dependent_varname):
+            dep_var_array[counter] = var
+
+        for counter, var in enumerate(fit_validator.independent_varname):
+            indep_var_array[counter] = var
+        mb_dep_var_cols_sql = ', '.join(dep_var_array)
+        mb_indep_var_cols_sql = ', '.join(indep_var_array)
+    else:
+
+        mb_dep_var_cols_sql = ', '.join(["dependent_var_{0}".format(i)
+                                         for i in fit_validator.dependent_varname])
+        mb_dep_var_cols_sql = "ARRAY[{0}]".format(mb_dep_var_cols_sql)
+
+        mb_indep_var_cols_sql = ', '.join(["independent_var_{0}".format(i)
+                                           for i in fit_validator.independent_varname])
+        mb_indep_var_cols_sql = "ARRAY[{0}]".format(mb_indep_var_cols_sql)
+
+    dep_shape_cols_sql = ', '.join(fit_validator.dependent_shape_varname)
+    ind_shape_cols_sql = ', '.join(fit_validator.independent_shape_varname)
+
+
+
+    # Define the state for the model and loss/metric storage lists
+    training_loss, training_metrics, metrics_elapsed_time = [], [], []
+    metrics_iters = []
+
+    # get the size of serialized model weights string in KB
+    model_size = sys.getsizeof(serialized_weights)/1024.0
+    record("model_size: {} \n".format(model_size ))
+
+    # Run distributed training for specified number of iterations
+    for i in range(1, num_iterations+1):
+        record("begin {} iteration at {}\n".format(i ,time.time()))
+        start_iteration = time.time()
+        is_final_iteration = (i == num_iterations)
+        total_images = get_image_count_per_seg_from_array(0, images_per_seg_train)
+        inner_iteration = math.ceil(total_images / samples_every)
+        start_id = 0
+        for j in range(1, int(inner_iteration)):
+            try:
+                run_training_iteration = plpy.prepare("""
+        SELECT {schema_madlib}.fit_step_batch_level(
+            {start_id},
+            {samples_every},
+            {mb_dep_var_cols_sql},
+            {mb_indep_var_cols_sql},
+            ARRAY[{dep_shape_cols_sql}],
+            ARRAY[{ind_shape_cols_sql}],
+            $MAD${model_arch}$MAD$::TEXT,
+            {compile_params_to_pass}::TEXT,
+            {fit_params_to_pass}::TEXT,
+            {dist_key_col},
+            ARRAY{dist_key_mapping},
+            {gp_segment_id_col},
+            ARRAY{segments_per_host},
+            ARRAY{images_per_seg_train},
+            ARRAY{accessible_gpus_for_seg},
+            $1,
+            $2
+        ) AS iteration_result
+        FROM {source_table}""".format(**locals()), ["bytea", "bytea"])
+                record("mdw send model at {}\n".format(time.time()))
+                serialized_weights = plpy.execute(run_training_iteration,
+                                              [serialized_weights, custom_function_map]
+                                              )[0]['iteration_result']
+                record("mdw finish fit_step at {}\n".format(time.time()))
+                model_size = sys.getsizeof(serialized_weights)/1024.0
+                record("model_size: {} \n".format(model_size ))
+                start_id = start_id + samples_every
+            except plpy.SPIError as e:
+                msg = e.message
+                if 'TransAggDetail' in msg:
+                    e.message, detail = msg.split('TransAggDetail')
+                elif 'MergeAggDetail' in msg:
+                    e.message, detail = msg.split('MergeAggDetail')
+                elif 'FinalAggDetail' in msg:
+                    e.message, detail = msg.split('FinalAggDetail')
+                else:
+                    raise e
+            # Extract Traceback from segment, add to
+            #  DETAIL of error message on coordinator
+                e.args = (e.message,)
+                spidata = list(e.spidata)
+                spidata[1] = detail
+                e.spidata = tuple(spidata)
+                raise e
+
+        end_iteration = time.time()
+        info_str = "\tTime for training in iteration {0}: {1} sec".format(i,
+                                                                          end_iteration - start_iteration)
+
+        if should_compute_metrics_this_iter(i, metrics_compute_frequency,
+                                            num_iterations):
+            """
+            If there is no validation dataset, we should clear the session/gd at
+            the last call to train evaluate. Otherwise clear it at the last call
+            to validation evaluate
+            """
+            should_clear_session = False
+            if not validation_set_provided:
+                should_clear_session = is_final_iteration
+
+            record("mdw begin compute_loss_and_metrics for train set at {}\n".format(time.time()))
+            compute_out = compute_loss_and_metrics(schema_madlib, source_table,
+                                                   fit_validator.dependent_varname,
+                                                   fit_validator.independent_varname,
+                                                   compile_params_to_pass,
+                                                   fit_params_to_pass,
+                                                   model_arch,
+                                                   serialized_weights, use_gpus,
+                                                   accessible_gpus_for_seg,
+                                                   segments_per_host,
+                                                   dist_key_mapping,
+                                                   images_per_seg_train,
+                                                   training_metrics,
+                                                   training_loss,
+                                                   should_clear_session,
+                                                   custom_function_map)
+            record("mdw finish compute_loss_and_metrics for train set at {}\n".format(time.time()))
+            metrics_iters.append(i)
+            compute_time, compute_metrics, compute_loss = compute_out
+            info_str = get_evaluate_info_msg(i, info_str, compute_out, True)
+            if validation_set_provided:
+                # Compute loss/accuracy for validation data.
+                record("mdw begin compute_loss_and_metrics for vaild set at {}\n".format(time.time()))
+                val_compute_out = compute_loss_and_metrics(schema_madlib,
+                                                           validation_table,
+                                                           fit_validator.val_dependent_varname,
+                                                           fit_validator.val_independent_varname,
+                                                           compile_params_to_pass,
+                                                           fit_params_to_pass,
+                                                           model_arch,
+                                                           serialized_weights,
+                                                           use_gpus,
+                                                           accessible_gpus_for_seg,
+                                                           segments_per_host,
+                                                           dist_key_mapping_val,
+                                                           images_per_seg_val,
+                                                           validation_metrics,
+                                                           validation_loss,
+                                                           is_final_iteration,
+                                                           custom_function_map)
+                info_str = get_evaluate_info_msg(i, info_str, val_compute_out,
+                                                 False)
+                record("mdw finish compute_loss_and_metrics for vaild set at {}\n".format(time.time()))
+
+            metrics_elapsed_end_time = time.time()
+            metrics_elapsed_time.append(
+                metrics_elapsed_end_time-metrics_elapsed_start_time)
+        plpy.info("\n"+info_str)
+        record("finish {} iteration at {}\n".format(i ,time.time()))
+
+    end_training_time = datetime.datetime.now()
+
+    version = madlib_version(schema_madlib)
+    norm_const = src_summary_dict['normalizing_const']
+    dep_vartype = src_summary_dict['dependent_vartype']
+    dependent_varname = src_summary_dict['dependent_varname']
+    independent_varname = src_summary_dict['independent_varname']
+
+    dep_name_list = ', '.join([quote_literal(i) for i in dependent_varname])
+    ind_name_list = ', '.join([quote_literal(i) for i in independent_varname])
+
+    # Define some constants to be inserted into the summary table.
+    model_type = "madlib_keras"
+    metrics_list = get_metrics_from_compile_param(compile_params)
+    is_metrics_specified = True if metrics_list else False
+    metrics_type = 'ARRAY{0}'.format(metrics_list) if is_metrics_specified else 'NULL'
+    metrics_iters = metrics_iters if metrics_iters else 'NULL'
+    loss_type = get_loss_from_compile_param(compile_params)
+
+    # We always compute the training loss and metrics, at least once.
+    training_metrics_final, training_metrics = get_metrics_sql_string(
+        training_metrics, is_metrics_specified)
+    training_loss_final, training_loss = get_metrics_sql_string(
+        training_loss, True)
+
+    # Validation loss and metrics are computed only if validation_table
+    # is provided.
+    if validation_set_provided:
+        validation_metrics_final, validation_metrics = get_metrics_sql_string(
+            validation_metrics, is_metrics_specified)
+        validation_loss_final, validation_loss = get_metrics_sql_string(validation_loss)
+        # Must quote the string before inserting to table. Explicitly
+        # quoting it here since this can also take a NULL value, done
+        # in the else part.
+        validation_table = quote_literal(validation_table)
+    else:
+        validation_metrics = validation_loss = 'NULL'
+        validation_metrics_final = validation_loss_final = 'NULL'
+        validation_table = 'NULL'
+
+    object_table = quote_literal(object_table) if object_table is not None else 'NULL'
+    class_values_colnames = ' , '.join(class_values_colnames)
+    if warm_start:
+        plpy.execute("DROP TABLE {0}, {1}".format
+                     (model, fit_validator.output_summary_model_table))
+    create_output_summary_table = plpy.prepare("""
+        CREATE TABLE {output_summary_model_table} AS
+        SELECT
+            $MAD${source_table}$MAD$::TEXT AS source_table,
+            $MAD${model}$MAD$::TEXT AS model,
+            ARRAY[{dep_name_list}]::TEXT[] AS dependent_varname,
+            ARRAY[{ind_name_list}]::TEXT[] AS independent_varname,
+            $MAD${model_arch_table}$MAD$::TEXT AS model_arch_table,
+            {model_id}::INTEGER AS {model_id_colname},
+            $1 AS compile_params,
+            $2 AS fit_params,
+            {num_iterations}::INTEGER AS num_iterations,
+            {validation_table}::TEXT AS validation_table,
+            {object_table}::TEXT AS object_table,
+            {metrics_compute_frequency}::INTEGER AS metrics_compute_frequency,
+            $3 AS name,
+            $4 AS description,
+            '{model_type}'::TEXT AS model_type,
+            {model_size}::DOUBLE PRECISION AS model_size,
+            '{start_training_time}'::TIMESTAMP AS start_training_time,
+            '{end_training_time}'::TIMESTAMP AS end_training_time,
+            $5 AS metrics_elapsed_time,
+            '{version}'::TEXT AS madlib_version,
+            ARRAY{num_classes}::INTEGER[] AS num_classes,
+            ARRAY{dep_vartype}::TEXT[] AS {dependent_vartype_colname},
+            {norm_const}::{FLOAT32_SQL_TYPE} AS {normalizing_const_colname},
+            {metrics_type}::TEXT[] AS metrics_type,
+            '{loss_type}'::TEXT AS loss_type,
+            {training_metrics_final}::DOUBLE PRECISION AS training_metrics_final,
+            {training_loss_final}::DOUBLE PRECISION AS training_loss_final,
+            {training_metrics}::DOUBLE PRECISION[] AS training_metrics,
+            {training_loss}::DOUBLE PRECISION[] AS training_loss,
+            {validation_metrics_final}::DOUBLE PRECISION AS validation_metrics_final,
+            {validation_loss_final}::DOUBLE PRECISION AS validation_loss_final,
+            {validation_metrics}::DOUBLE PRECISION[] AS validation_metrics,
+            {validation_loss}::DOUBLE PRECISION[] AS validation_loss,
+            ARRAY{metrics_iters}::INTEGER[] AS metrics_iters,
+            {class_values_colnames}
+        FROM {source_summary_table}
+        """.format(output_summary_model_table=fit_validator.output_summary_model_table,
+                   dependent_vartype_colname=DEPENDENT_VARTYPE_COLNAME,
+                   normalizing_const_colname=NORMALIZING_CONST_COLNAME,
+                   FLOAT32_SQL_TYPE = FLOAT32_SQL_TYPE,
+                   model_id_colname = ModelArchSchema.MODEL_ID,
+                   source_summary_table=fit_validator.source_summary_table,
+                   **locals()),
+                                               ["TEXT", "TEXT", "TEXT", "TEXT", "DOUBLE PRECISION[]"])
+    plpy.execute(create_output_summary_table,
+                 [compile_params, fit_params, name,
+                  description, metrics_elapsed_time])
+
+    plpy.execute("""
+        CREATE TABLE {0}
+        (model_weights bytea,
+        {1} json)""".format(model, ModelArchSchema.MODEL_ARCH))
+    insert_output_table = plpy.prepare("""
+        INSERT INTO {0} SELECT model_weights, {1}
+        FROM (VALUES($1, $2))t(model_weights, {1})
+        """.format(model, ModelArchSchema.MODEL_ARCH), ["bytea", "json"])
+    plpy.execute(insert_output_table, [serialized_weights, model_arch])
+
+    #TODO add a unit test for this in a future PR
+    reset_cuda_env(original_cuda_env)
+
+
+def fit_transition_batch_level(state, start_id, samples_every, dependent_var, independent_var, dependent_var_shape,
+                   independent_var_shape, model_architecture,
+                   compile_params, fit_params, dist_key, dist_key_mapping,
+                   current_seg_id, segments_per_host, images_per_seg,
+                   accessible_gpus_for_seg, prev_serialized_weights,
+                   is_multiple_model=False, custom_function_map=None, **kwargs):
+    """
+    This transition function is common for madlib_keras_fit() and
+    madlib_keras_fit_multiple_model(). The important difference between
+    these two calls is the way tensorflow/keras sessions and GD gets used.
+    For madlib_keras_fit_multiple_model,
+        a. We create a tensorflow session per hop and store it in GD alongwith
+        the model and clear both GD and the session at the end of each
+        hop.
+    For madlib_keras_fit,
+        b. We create only one tensorflow session for both fit and eval transition
+        functions and store it in GD. This session gets reused by both fit and eval
+        and only gets cleared in eval transition at the last row of the last iteration.
+
+    """
+    if not dependent_var_shape[0] or not independent_var_shape[0] \
+            or dependent_var[0] is None or independent_var[0] is None:
+        plpy.error("fit_transition called with no data")
+
+    if not prev_serialized_weights or not model_architecture:
+        return state
+
+    current_seg_id = dist_key_mapping.index(dist_key)
+    record("seg {} enter fit_trans at {}\n".format(current_seg_id ,time.time()))
+    GD = kwargs['GD']
+
+    trans_enter_time = time.time()
+
+    device_name = get_device_name_and_set_cuda_env(accessible_gpus_for_seg[current_seg_id], current_seg_id)
+
+    segment_model, sess = get_init_model_and_sess(GD, device_name,
+                                                  accessible_gpus_for_seg[current_seg_id],
+                                                  segments_per_host[current_seg_id],
+                                                  model_architecture, compile_params,
+                                                  custom_function_map)
+
+    if GD_STORE.AGG_IMAGE_COUNT in GD:
+        record("seg {} restore model at {}\n".format(current_seg_id, time.time()))
+        agg_image_count = GD[GD_STORE.AGG_IMAGE_COUNT]
+    else:
+        record("seg {} receive model at {}\n".format(current_seg_id, time.time()))
+        agg_image_count = 0
+        GD[GD_STORE.AGG_IMAGE_COUNT] = agg_image_count
+        set_model_weights(segment_model, prev_serialized_weights)
+    record("seg {} finish set model at {}\n".format(current_seg_id, time.time()))
+    record(str(dependent_var_shape) + '\n')
+    record("seg {}, agg_image_count: {},  start_id: {}, end_id: {} \n".format(current_seg_id, agg_image_count, start_id, start_id + samples_every))
+    if agg_image_count >= start_id and agg_image_count <= start_id + samples_every:
+        x_train = []
+        y_train = []
+        # Prepare the data
+        for counter, shape in enumerate(independent_var_shape):
+            x_train.append(np_array_float32(independent_var[counter], shape))
+
+        for counter, shape in enumerate(dependent_var_shape):
+            y_train.append(np_array_int16(dependent_var[counter], shape))
+
+        # Fit segment model on data
+        #TODO consider not doing this every time
+        fit_params = parse_and_validate_fit_params(fit_params, current_seg_id)
+        x_train_tmp = x_train[0].T
+        X = [np.array(x_train_tmp[i, :]) for i in range(x_train_tmp.shape[0])]
+        f = open("/data2/ruike/tmp.txt", 'a')
+        f.write("test !\n")
+        f.write(str(len(y_train)))
+        f.write(str(y_train[0].shape))
+        f.write(str(len(x_train)))
+        f.write(str(x_train[0].shape))
+        f.write(str(y_train[0][:,0].reshape(-1,1).shape))
+        f.write(str(X[0].shape))
+        f.write("Train model at {}\n".format(time.time()))
+        f.close()
+        record("seg {} train model at {}\n".format(current_seg_id, time.time()))
+        segment_model.fit(X, y_train[0][:,0].reshape(-1, 1), **fit_params)
+        # Aggregating number of images, loss and accuracy
+        record("seg {} finish train model at {}\n".format(current_seg_id, time.time()))
+
+    agg_image_count += dependent_var_shape[0][0]
+    GD[GD_STORE.AGG_IMAGE_COUNT] = agg_image_count
+    total_images = get_image_count_per_seg_from_array(dist_key_mapping.index(dist_key),
+                                                      images_per_seg)
+    is_last_row = agg_image_count == total_images
+    return_state = get_state_to_return(segment_model, is_last_row, is_multiple_model,
+                                       agg_image_count, total_images)
+
+    if is_last_row:
+        del GD[GD_STORE.AGG_IMAGE_COUNT]  # Must be reset after each pass through images
+        if is_multiple_model:
+            GD_STORE.clear(GD)
+            clear_keras_session(sess)
+
+    trans_exit_time = time.time()
+    DEBUG.plpy.info("|_fit_transition_time_|{}|".format(trans_exit_time - trans_enter_time))
+    record("seg {} leave fit_trans at {}\n".format(current_seg_id ,time.time()))
+    record("seg {} fit_trans last {}\n".format(current_seg_id ,trans_exit_time - trans_enter_time))
+    return return_state
+
+def fit_transition_wide_batch_level(state, start_id, samples_every, dependent_var1, dependent_var2, dependent_var3,
+                   dependent_var4, dependent_var5, independent_var1,
+                   independent_var2, independent_var3, independent_var4,
+                   independent_var5, dependent_var_shape,
+                   independent_var_shape, model_architecture,
+                   compile_params, fit_params, dist_key, dist_key_mapping,
+                   current_seg_id, segments_per_host, images_per_seg,
+                   accessible_gpus_for_seg, prev_serialized_weights,
+                   is_multiple_model=False, custom_function_map=None, **kwargs):
+
+    if not independent_var1 or not dependent_var1:
+        return state
+    dependent_var = [dependent_var1, dependent_var2, dependent_var3,
+                        dependent_var4, dependent_var5]
+    independent_var = [independent_var1, independent_var2, independent_var3,
+                        independent_var4, independent_var5]
+
+    dependent_var = [i for i in dependent_var if i is not None]
+    independent_var = [i for i in independent_var if i is not None]
+
+    return fit_transition_batch_level(state, start_id, samples_every, dependent_var, independent_var, dependent_var_shape,
+                   independent_var_shape, model_architecture,
+                   compile_params, fit_params, dist_key, dist_key_mapping,
+                   current_seg_id, segments_per_host, images_per_seg,
+                   accessible_gpus_for_seg, prev_serialized_weights,
+                   is_multiple_model, custom_function_map, **kwargs)
