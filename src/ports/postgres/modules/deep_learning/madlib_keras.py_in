@@ -1509,7 +1509,6 @@ def fit_batch_level(schema_madlib, source_table, model, model_arch_table,
         total_images = get_image_count_per_seg_from_array(0, images_per_seg_train)
         inner_iteration = math.ceil(total_images / float(samples_every))
         plpy.info("\n"+ "total_images: {} Total inner_iteration: {}".format(total_images, inner_iteration))
-        start_id = 0
         start_slot = 1
         end_slot = 1 + slot_every
         for j in range(1, int(inner_iteration)):
@@ -1521,7 +1520,6 @@ def fit_batch_level(schema_madlib, source_table, model, model_arch_table,
             FROM {source_table}
         )
         SELECT {schema_madlib}.fit_step_batch_level(
-            {start_id},
             {samples_every},
             {mb_dep_var_cols_sql},
             {mb_indep_var_cols_sql},
@@ -1550,7 +1548,6 @@ def fit_batch_level(schema_madlib, source_table, model, model_arch_table,
                 record("mdw finish fit_step at {}\n".format(time.time()))
                 model_size = sys.getsizeof(serialized_weights)/1024.0
                 record("model_size: {} \n".format(model_size ))
-                start_id = start_id + samples_every
                 start_slot = start_slot + slot_every
                 end_slot = end_slot + slot_every
             except plpy.SPIError as e:
@@ -1746,7 +1743,7 @@ def fit_batch_level(schema_madlib, source_table, model, model_arch_table,
     reset_cuda_env(original_cuda_env)
 
 
-def fit_transition_batch_level(state, start_id, samples_every, dependent_var, independent_var, dependent_var_shape,
+def fit_transition_batch_level(state, samples_every, dependent_var, independent_var, dependent_var_shape,
                    independent_var_shape, model_architecture,
                    compile_params, fit_params, dist_key, dist_key_mapping,
                    current_seg_id, segments_per_host, images_per_seg,
@@ -1796,9 +1793,7 @@ def fit_transition_batch_level(state, start_id, samples_every, dependent_var, in
         GD[GD_STORE.AGG_IMAGE_COUNT] = agg_image_count
         set_model_weights(segment_model, prev_serialized_weights)
     record("seg {} finish set model at {}\n".format(current_seg_id, time.time()))
-    record(str(dependent_var_shape) + '\n')
-    record("seg {}, agg_image_count: {},  start_id: {}, end_id: {} \n".format(current_seg_id, agg_image_count, start_id, start_id + samples_every))
-    #if agg_image_count >= start_id and agg_image_count <= start_id + samples_every:
+
     x_train = []
     y_train = []
     # Prepare the data
@@ -1813,16 +1808,6 @@ def fit_transition_batch_level(state, start_id, samples_every, dependent_var, in
     fit_params = parse_and_validate_fit_params(fit_params, current_seg_id)
     x_train_tmp = x_train[0].T
     X = [np.array(x_train_tmp[i, :]) for i in range(x_train_tmp.shape[0])]
-    f = open("/data2/ruike/tmp.txt", 'a')
-    f.write("test !\n")
-    f.write(str(len(y_train)))
-    f.write(str(y_train[0].shape))
-    f.write(str(len(x_train)))
-    f.write(str(x_train[0].shape))
-    f.write(str(y_train[0][:,0].reshape(-1,1).shape))
-    f.write(str(X[0].shape))
-    f.write("Train model at {}\n".format(time.time()))
-    f.close()
     record("seg {} train model at {}\n".format(current_seg_id, time.time()))
     segment_model.fit(X, y_train[0][:,0].reshape(-1, 1), **fit_params)
     # Aggregating number of images, loss and accuracy
@@ -1832,9 +1817,10 @@ def fit_transition_batch_level(state, start_id, samples_every, dependent_var, in
     GD[GD_STORE.AGG_IMAGE_COUNT] = agg_image_count
     total_images = get_image_count_per_seg_from_array(dist_key_mapping.index(dist_key),
                                                       images_per_seg)
-    is_last_row = agg_image_count >= samples_every
+    is_last_row = agg_image_count > (samples_every - dependent_var_shape[0][0])
+    record("seg {}: agg_image_count:{}, samples_every:{}\n".format(current_seg_id, agg_image_count, samples_every))
     return_state = get_state_to_return(segment_model, is_last_row, is_multiple_model,
-                                       agg_image_count, total_images)
+                                       agg_image_count, agg_image_count)
 
     if is_last_row:
         del GD[GD_STORE.AGG_IMAGE_COUNT]  # Must be reset after each pass through images
@@ -1848,7 +1834,7 @@ def fit_transition_batch_level(state, start_id, samples_every, dependent_var, in
     record("seg {} fit_trans last {}\n".format(current_seg_id ,trans_exit_time - trans_enter_time))
     return return_state
 
-def fit_transition_wide_batch_level(state, start_id, samples_every, dependent_var1, dependent_var2, dependent_var3,
+def fit_transition_wide_batch_level(state, samples_every, dependent_var1, dependent_var2, dependent_var3,
                    dependent_var4, dependent_var5, independent_var1,
                    independent_var2, independent_var3, independent_var4,
                    independent_var5, dependent_var_shape,
@@ -1868,7 +1854,7 @@ def fit_transition_wide_batch_level(state, start_id, samples_every, dependent_va
     dependent_var = [i for i in dependent_var if i is not None]
     independent_var = [i for i in independent_var if i is not None]
 
-    return fit_transition_batch_level(state, start_id, samples_every, dependent_var, independent_var, dependent_var_shape,
+    return fit_transition_batch_level(state, samples_every, dependent_var, independent_var, dependent_var_shape,
                    independent_var_shape, model_architecture,
                    compile_params, fit_params, dist_key, dist_key_mapping,
                    current_seg_id, segments_per_host, images_per_seg,

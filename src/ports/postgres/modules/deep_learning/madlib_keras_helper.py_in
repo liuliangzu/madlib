@@ -518,3 +518,12 @@ def get_data_distribution_per_segment(table_name):
         for r in res:
             data_distribution_per_segment[r['content']] = int(r['cnt'])
         return data_distribution_per_segment
+
+def get_buffer_size(table_name, shape_col):
+    buffer_size = plpy.execute(
+                """ SELECT {0}[1] AS buffer_size
+                    FROM {1}
+                    LIMIT 1
+                """.format(shape_col, table_name))
+    buffer_size = int(buffer_size[0]['buffer_size'])
+    return buffer_size
